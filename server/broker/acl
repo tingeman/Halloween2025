@@ -1,0 +1,25 @@
+# --- Admin (full access) ---
+user admin
+topic readwrite #
+
+# --- Dashboard (subscribe everything; publish only to UI/control bus if you add one) ---
+user dashboard
+topic read halloween/+/status
+topic read halloween/+/telemetry
+topic read halloween/broadcast/#
+topic write halloween/ui/#
+# (add or remove writes as your dashboard needs)
+
+# --- Worker host (often needs broad RW to orchestrate props) ---
+user worker
+topic readwrite halloween/+/#
+topic read halloween/broadcast/#
+
+# All props: shared device user, isolation by CLIENT ID
+# Each prop must publish/subscribe only under its own clientid:
+#   clientid = <prop_id>    e.g., coffin_jumper
+#   topics   = halloween/<clientid>/...
+user device
+pattern readwrite halloween/%c/#
+# Deny access to any other topic to enforce the pattern rule above
+topic read #

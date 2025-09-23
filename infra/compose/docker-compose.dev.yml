@@ -1,0 +1,22 @@
+# dev overrides
+services:
+  mqtt_test:
+    image: python:3.12-slim
+    depends_on:
+      - mqtt
+    working_dir: /work
+    volumes:
+      - ../../libs/py:/work/libs/py:ro
+    env_file:
+      - ../../config/secrets/mqtt_users.env     # ← add this line
+    environment:
+      - PYTHONPATH=/work/libs/py
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - MQTT_WS_PORT=9001
+    entrypoint: ["/bin/sh","-lc"]
+    command: >
+      "cp -r /work/libs/py /tmp/py &&
+       python -m pip install -q /tmp/py[test] &&
+       pytest -q -sv /tmp/py/tests/integration/mqtt &&
+       sleep 10"
