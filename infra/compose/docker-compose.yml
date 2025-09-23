@@ -1,0 +1,59 @@
+# base compose
+
+services:
+  passwd_builder:
+    image: eclipse-mosquitto:2.0
+    env_file:
+      - ../../config/secrets/mqtt_users.env
+    volumes:
+      - mosquitto_config:/mosquitto/config
+      - ../../server/broker/build_passwd.sh:/build_passwd.sh:ro
+    entrypoint: ["/bin/sh","/build_passwd.sh"]
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: halloween_mqtt
+    depends_on:
+      passwd_builder:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    env_file:
+      - ../../config/secrets/mqtt_users.env
+    ports:
+      - "1883:1883"        # MQTT (TCP)
+      - "9001:9001"        # WebSockets (optional, for browser clients)
+    volumes:
+      - mosquitto_config:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+      - ../../server/broker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../../server/broker/acl:/mosquitto/config/acl:ro
+      - ../../server/broker/mqtt_entrypoint.sh:/mqtt_entrypoint.sh:ro
+      # tmp run dir for pid file lives inside container fs; no extra volume needed
+    entrypoint: ["/bin/sh","/mqtt_entrypoint.sh"]      
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -p 1883 -u $$MQTT_ADMIN_USER -P $$MQTT_ADMIN_PW -t healthcheck/ping -m ok"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+
+  # api:
+  #   environment:
+  #     - MQTT_HOST=mqtt
+  #     - MQTT_PORT=1883
+  # dashboard:
+  #   environment:
+  #     - MQTT_HOST=mqtt
+  #     - MQTT_PORT=9001   # if using WebSockets in the browser
+  # worker_host:
+  #   environment:
+  #     - MQTT_HOST=mqtt
+  #     - MQTT_PORT=1883
+
+
+volumes:
+  mosquitto_config:
+  mosquitto_data:
+  mosquitto_log:

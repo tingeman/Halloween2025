@@ -1,0 +1,1 @@
+# coffin jumper dashboard plugin
