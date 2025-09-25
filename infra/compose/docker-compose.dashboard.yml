@@ -1,0 +1,19 @@
+
+services:
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: server/dashboard/Dockerfile
+    image: halloween-dashboard:latest
+    env_file:
+      - ../../config/secrets/mqtt_users.env
+      - ../../config/dashboard.env
+    environment:
+      - PYTHONPATH=/opt/libs/py
+      - DASHBOARD_DEBUG=1
+    volumes:
+      - ../../props:/opt/props:ro
+      - ../../libs/py:/opt/libs/py:ro
+    ports:
+      - "8050:8050"
+    restart: unless-stopped
