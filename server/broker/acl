@@ -7,6 +7,7 @@ user dashboard
 topic read halloween/+/status
 topic read halloween/+/telemetry
 topic read halloween/broadcast/#
+topic read halloween/broker/uptime
 topic write halloween/ui/#
 # (add or remove writes as your dashboard needs)
 
@@ -21,5 +22,4 @@ topic read halloween/broadcast/#
 #   topics   = halloween/<clientid>/...
 user device
 pattern readwrite halloween/%c/#
-# Deny access to any other topic to enforce the pattern rule above
-topic read #
+
