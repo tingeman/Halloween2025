@@ -5,6 +5,7 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Dict, Any, Tuple
+import types
 
 # Toggle verbose tracebacks by setting ENV: DASHBOARD_DEBUG=1
 import os
@@ -73,7 +74,35 @@ def _try_load_one(module_name: str, file_path: Path) -> PluginDesc | None:
             traceback.print_exc()
         return None
 
-    desc, errors = _validate_plugin(m, file_path)
+    # Backwards-compatible support: if the module exposes a `Plugin` class,
+    # instantiate it (no-arg constructor expected) and validate the instance
+    # instead of the raw module. This lets plugin authors provide class-based
+    # plugins while keeping the old module-level API working.
+    plugin_target = m
+    if hasattr(m, "Plugin"):
+        PluginCls = getattr(m, "Plugin")
+        try:
+            inst = PluginCls()
+        except Exception as e:
+            print(f"[plugin_loader] Failed to instantiate Plugin from {file_path}: {e}")
+            if DEBUG:
+                traceback.print_exc()
+            return None
+
+        # Build a simple namespace that mimics the module attributes checked
+        # by _validate_plugin so we can reuse the existing validation logic.
+        ns = types.SimpleNamespace()
+        # Prefer instance attributes, fall back to module-level attributes
+        ns.name = getattr(inst, "name", getattr(m, "name", None))
+        # layout may be an instance method (callable) or attribute
+        ns.layout = getattr(inst, "layout", getattr(m, "layout", None))
+        # allow both register or register_callbacks method names
+        ns.register_callbacks = getattr(inst, "register", getattr(inst, "register_callbacks", getattr(m, "register_callbacks", None)))
+        ns.zone = getattr(inst, "zone", getattr(m, "zone", "card"))
+
+        plugin_target = ns
+
+    desc, errors = _validate_plugin(plugin_target, file_path)
     if errors:
         print(f"[plugin_loader] {file_path} is not a valid plugin:")
         for err in errors:

@@ -4,6 +4,7 @@ topic readwrite #
 
 # --- Dashboard (subscribe everything; publish only to UI/control bus if you add one) ---
 user dashboard
+topic read halloween/+/availability
 topic read halloween/+/status
 topic read halloween/+/telemetry
 topic read halloween/broadcast/#
@@ -22,4 +23,4 @@ topic read halloween/broadcast/#
 #   topics   = halloween/<clientid>/...
 user device
 pattern readwrite halloween/%c/#
-
+topic read halloween/broker/uptime
