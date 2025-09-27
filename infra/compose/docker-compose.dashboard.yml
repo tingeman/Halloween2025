@@ -9,7 +9,8 @@ services:
       - ../../config/secrets/mqtt_users.env
       - ../../config/dashboard.env
     environment:
-      - PYTHONPATH=/opt/libs/py
+      # ensure the installed/copied plugin_base package is on PYTHONPATH
+      - PYTHONPATH=/opt/libs/py:/opt/plugin_base
       - DASHBOARD_DEBUG=1
     volumes:
       - ../../props:/opt/props:ro
