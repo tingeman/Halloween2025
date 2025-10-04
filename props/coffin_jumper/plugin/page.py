@@ -27,6 +27,7 @@ class Plugin(BasePlugin):
     T_TEL = "halloween/esp32-coffin-jumper-01/telemetry"
     T_CMD = "halloween/esp32-coffin-jumper-01/cmd"
     T_AVAIL = "halloween/esp32-coffin-jumper-01/availability"
+    T_STATE = "halloween/esp32-coffin-jumper-01/state"
 
     def layout(self):
         """Return the Dash layout for the plugin."""
@@ -39,7 +40,12 @@ class Plugin(BasePlugin):
                 html.Span(id="cj-availability", className="ms-2", children=[
                     html.Span("unknown", className="badge bg-secondary text-white")
                 ]),
+                # State badge (like availability, but for the current state)
+                html.Span(id="cj-state", className="ms-2", children=[
+                    html.Span("unknown", className="badge bg-secondary text-white")
+                ]),
             ]),
+            # Simple text display for the current fire count
             html.Div(id="cj-fires", children="fires: —"),
             # Telemetry table: a simple key / value table. The callback
             # will populate this table with rows showing the current
@@ -66,6 +72,8 @@ class Plugin(BasePlugin):
         self.mqtt_subscribe(self.T_TEL, self._on_telem)
         # Subscribe to availability (LWT / retained) so we can show online/offline
         self.mqtt_subscribe(self.T_AVAIL, self._on_avail)
+        # Subscribe to state updates (like availability, but for current state)
+        self.mqtt_subscribe(self.T_STATE, self._on_state)
 
         # Register Dash callbacks using bound instance methods.
         # Note: app.callback(...) returns a decorator; calling that decorator
@@ -92,6 +100,12 @@ class Plugin(BasePlugin):
             Output("cj-availability", "children"),
             Input(self._tick, "n_intervals"),
         )(self._render_avail)
+
+        # Periodic render for state badge
+        app.callback(
+            Output("cj-state", "children"),
+            Input(self._tick, "n_intervals"),
+        )(self._render_state)
 
         # Register trigger button callback
         # n_clicks is the button click count; by returning 0 from the callback, we prevent multiple clicks
@@ -166,6 +180,37 @@ class Plugin(BasePlugin):
             return html.Span("offline", className="badge bg-danger text-white")
         return html.Span(s, className="badge bg-secondary text-white")
 
+    def _on_state(self, topic, payload: bytes):
+        """Handle state updates (like availability, but for current state)."""
+        try:
+            text = payload.decode()
+            # try JSON first
+            try:
+                parsed = json.loads(text)
+                state = parsed.get("state") if isinstance(parsed, dict) else None
+            except Exception:
+                state = None
+
+            if not state:
+                # fallback to plain text
+                state = text.strip()
+
+            self.cache["cj_state"] = state
+        except Exception:
+            self.cache["cj_state"] = None
+
+    def _render_state(self, _):
+        """Render the state badge as a colored inline element."""
+        s = (self.cache.get("cj_state") or "unknown").lower()
+        if s in ("idle", "ready"):
+            # Bootstrap green badge
+            return html.Span(s, className="badge bg-success text-white")
+        if s in ("jumping", "playing"):
+            return html.Span(s, className="badge bg-primary text-white")
+        if s in ("IO Error", "error", "fault"):
+            return html.Span(s, className="badge bg-danger text-white")
+        return html.Span(s, className="badge bg-secondary text-white")
+
     def _trigger(self, _, volume):
         """Handle Trigger button presses and publish MQTT commands."""
         cmd = {"action": "trigger"}
@@ -175,9 +220,9 @@ class Plugin(BasePlugin):
         self.mqtt_publish(self.T_CMD, json.dumps(cmd))
         return 0
 
-    def _trigger(self, _, volume):
-        """Handle Trigger button presses and publish MQTT commands."""
-        cmd = {"action": "play"}
+    def _play(self, _, volume):
+        """Handle Play button presses and publish MQTT 'play' command."""
+        cmd = {"action": "play_music"}
         if volume is not None:
             cmd["params"] = {"volume": int(volume)}
         # publish using helper made available by BasePlugin
