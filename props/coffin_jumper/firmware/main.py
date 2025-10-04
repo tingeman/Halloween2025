@@ -23,8 +23,9 @@ try:
     import network, machine, ubinascii  # type: ignore
     from machine import Pin, I2C  # type: ignore
     from umqtt.simple import MQTTClient  # type: ignore
-    from dfplayer import DFPlayer  # type: ignore
     import secrets  # device secrets on the target
+    import dfplayer  # MANUAL INSTALL NEEDED! DOESN'T COME WITH MIP
+    from pir_hcsr501 import PIRLatch
 except Exception:
     # Provide fallbacks so the module can be imported on CPython for tests.
     network = None
@@ -46,14 +47,17 @@ OLED_H = 64
 OLED_ADDR = 0x3C
 
 # ---- Pins ----
-PIN_PIR       = 23      # PIR output (3.3V logic!)   (Not updated)
-PIN_SOLENOID  = 18      # MOSFET gate                (Not updated)
-UART_NUM      = 1       # DFPlayer UART (only relevant if you use DFPlayer here)
-UART_TX       = 13      # ESP32 TX -> DF RX   (Updated per board)
-UART_RX       = 12      # ESP32 RX <- DF TX   (Updated per board)
-UART_BAUD     = 9600    # DFPlayer default
-I2C_SDA       = 21
-I2C_SCL       = 22
+PIN_PIR        = 4       # PIR output (3.3V logic!) 
+PIR_LOCKOUT_MS = 5000    # Minimum ms between triggers
+PIR_DEBOUNCE_MS= 300     # Debounce time for PIR edges (minimum time between edges)
+PIR_WARMUP_MS  = 5000    # Ignore PIR edges for this long after boot
+PIN_SOLENOID   = 18      # MOSFET gate                (Not updated)
+UART_NUM       = 2       # DFPlayer UART
+UART_TX        = 17      # ESP32 TX -> DF RX   (Updated per board)
+UART_RX        = 16      # ESP32 RX <- DF TX   (Updated per board)
+I2C_SDA        = 21
+I2C_SCL        = 22
+
 
 # ---- Topics ----
 BASE = b"halloween/esp32-coffin-jumper-01"
@@ -68,9 +72,11 @@ _debug = secrets.DEBUG if hasattr(secrets, "DEBUG") else False
 _state = "idle"
 _blocked = False
 _triggers = 0
+_volume = 20
 _broker_uptime_str = "—"
 client = None           # MQTT client instance
 oled = None             # SSD1306 instance
+pir_latch = None
 
 # ---- Timezone (adjust when DST changes) ----
 TZ_OFFSET_HOURS = 2     # Denmark: 1 (CET winter), 2 (CEST summer)
@@ -182,18 +188,20 @@ def render_display() -> None:
     ``_triggers``, ``_blocked`` and ``_broker_uptime`` and updates the OLED
     contents. If no OLED is available it is a no-op.
     """
-    # Uses global 'oled'
+    global oled, pir_latch
+
     if oled is None:
         return
     oled.fill(0)
     oled.text("Coffin v{}".format(FW_VERSION), 0, 0)
     oled.text("State: {}".format(_state[:10]), 0, 8)
     oled.text("Trig: {}".format(_triggers), 0, 16)
-    oled.text("Blk: {}".format("Y" if _blocked else "N"), 0, 24)
+    oled.text("PIR: {}".format("Motion!" if pir_latch.active() else "---"), 0, 24)
+    oled.text("Blk: {}".format("Y" if _blocked else "N"), 0, 32)
     up = _broker_uptime_str
     if len(up) > 18:
         up = up[:18]
-    oled.text("Up: {}".format(up), 0, 32)
+    oled.text("Up: {}".format(up), 0, 40)
     oled.show()
 
 def publish(mq: object, topic: object, payload: object, retain: bool = False) -> None:
@@ -264,8 +272,10 @@ def telemetry(mq: object, wlan: object) -> None:
     tel = {
         "fw": FW_VERSION,
         "uptime_s": time.ticks_ms()//1000,
+        "triggers": _triggers,
+        "pir": "Motion!" if pir_latch.active() else "---",
         "blocked": _blocked,
-        "vol": dfp.volume,
+        "vol": _volume,
         "rssi": wlan.status('rssi') if hasattr(wlan, "status") else None,
     }
     publish(mq, T_TEL, tel, retain=False)
@@ -363,6 +373,75 @@ def on_broker_uptime(mq: object, topic: object, msg: object) -> None:
 
     render_display()
 
+def dfp_set_volume(mq: object, vol: int) -> None:
+    """Set the DFPlayer volume with bounds checking.
+
+    Args:
+        vol (int): Volume level (0-30).
+    """
+    global _volume
+
+    try:
+        if 0 <= vol <= 30:
+            _volume = vol
+            dfp.volume(_volume)
+        else:
+            print("Volume out of range (0-30):", vol)
+    except Exception as e:
+        print("Error setting volume:", e)
+
+def dfp_play_track(mq: object, folder: int = 0, track: int = 1) -> None:
+    """Play a specific track number on the DFPlayer.
+
+    Args:
+        track (int): Track number to play (1-based).
+    """
+    try:
+        if track >= 1:
+            dfp.send_cmd(3, folder, track)
+            # dfp.play(folder, track)    # This command does not work properly with our board
+            set_state(mq, "playing")
+        else:
+            print("Track number must be >= 1:", track)
+    except Exception as e:
+        print("Error playing track:", e)
+
+def dfp_pause(mq: object) -> None:
+    """Pause playback on the DFPlayer.
+    """
+    try:
+        dfp.send_cmd(int('0E', 16))  # Send pause command
+    except Exception as e:
+        print("Error pausing track:", e)
+
+def dfp_resume(mq: object) -> None:
+    """Resume playback on the DFPlayer.
+    """
+    try:
+        dfp.send_cmd(int('0D', 16))  # Send resume command
+        set_state(mq, "playing")
+    except Exception as e:
+        print("Error resuming track:", e)
+
+def dfp_stop(mq: object) -> None:
+    """Stop playback on the DFPlayer.
+    """
+    try:
+        dfp.send_cmd(int('16', 16))  # Send stop command
+        set_state(mq, "armed" if not _blocked else "blocked")
+    except Exception as e:
+        print("Error stopping track:", e)
+
+def start_action(mq: object) -> None:
+    """Perform preprogrammed action.
+
+    Args:
+        mq: MQTT client instance (unused except for state publishing).
+    """
+    print("starting ACTION...")
+    dfp_play_track(mq, folder=0, track=1)
+    set_state(mq, "action")
+
 def on_cmd(mq: object, topic: object, msg: object) -> None:
     """Handle incoming command messages.
 
@@ -384,18 +463,22 @@ def on_cmd(mq: object, topic: object, msg: object) -> None:
     action = None
     value  = None
     track  = None
+    params = {}
 
     if s.startswith("{"):
+        print("Parsing JSON command:", s)
         try:
             obj = json.loads(s)
             action = obj.get("action")
-            value = obj.get("value")
-            track = obj.get("track")
+            value = obj.get("value", None)
+            params = obj.get("params", {})
         except Exception:
             pass
 
     if action is None:
         action = s.strip().lower()
+
+    print("Command action:", action)
 
     if action == "block":
         _blocked = True
@@ -408,6 +491,22 @@ def on_cmd(mq: object, topic: object, msg: object) -> None:
     elif action == "arm":
         if not _blocked:
             set_state(mq, "armed")
+    elif action == "trigger":
+        if not _blocked and _state in ("armed", "idle"):
+            start_action(mq)
+    elif action == "play_music":    
+        vol = params.get("volume", None)
+        if vol is not None:
+            dfp_set_volume(mq, vol)
+        track = params.get("track", 1)
+        dfp_play_track(mq, folder=0, track=track)
+    elif action == "pause_music":
+        dfp_pause(mq)
+    elif action == "resume_music":
+        dfp_resume(mq)
+    elif action == "stop_music":
+        dfp_stop(mq)
+
     # 'trigger' and 'volume' left out intentionally in this trimmed demo
 
 def make_client() -> object:
@@ -442,12 +541,22 @@ def main() -> None:
     telemetry. The function catches MQTT errors and performs a simple
     automatic reconnect sequence.
     """
-    global client, oled, dfp
+    global client, oled, dfp, pir_latch, _blocked, _triggers, _volume, _state, _broker_uptime_str
 
-    # 1) Wi-Fi first (needed if ensure_lib uses mip)
+    # Wi-Fi first (needed if ensure_lib uses mip)
     wlan = wifi_connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
 
-    # 2) Ensure OLED driver present, init I2C + OLED ONCE (global)
+    # Initialize PIR early, so it is available for display updates
+    pir_latch = PIRLatch(PIN_PIR, 
+                         hold_ms=PIR_LOCKOUT_MS, 
+                         debounce_ms=PIR_DEBOUNCE_MS, 
+                         warmup_ms=PIR_WARMUP_MS
+                         )    
+    # Sensor motion = HIGH (3.3V)
+    # Sensor idle   = LOW  (0V)
+
+
+    # Ensure OLED driver present, init I2C + OLED ONCE (global)
     ssd1306 = ensure_lib("ssd1306")
     try:
         i2c = I2C(0, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
@@ -455,9 +564,9 @@ def main() -> None:
         i2c = I2C(1, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
     oled = ssd1306.SSD1306_I2C(OLED_W, OLED_H, i2c, addr=OLED_ADDR)
 
-    uart = machine.UART(UART_NUM, baudrate=UART_BAUD, tx=machine.Pin(UART_TX), rx=machine.Pin(UART_RX))
-    dfp = DFPlayer(uart)
-    dfp.set_volume(20)  # reasonable default; override via MQTT
+    # Initialize DFPlayer (global)
+    dfp = dfplayer.DFPlayer(uart_id=UART_NUM, tx_pin_id=UART_TX, rx_pin_id=UART_RX)
+    dfp.volume(_volume)  # reasonable default; override via MQTT
 
     # Splash
     ip = wlan.ifconfig()[0]
@@ -467,7 +576,7 @@ def main() -> None:
     oled.text("Syncing NTP...", 0, 24)
     oled.show()
 
-    # 3) NTP (optional)
+    # NTP time syncing (optional)
     try:
         import ntptime
         ntptime.settime()
@@ -475,7 +584,7 @@ def main() -> None:
     except Exception as e:
         print("NTP error:", e)
 
-    # 4) MQTT connect + subscribe
+    # MQTT connect + subscribe
     if client is None:
         client = make_client()
         client.connect()
@@ -484,7 +593,7 @@ def main() -> None:
         birth(client)
         set_state(client, "armed" if not _blocked else "blocked")
 
-    # 5) Main loop
+    # Main loop
     last_tel = 0
     while True:
         # pump MQTT to receive messages (like broker uptime)
@@ -504,6 +613,27 @@ def main() -> None:
             client.subscribe(T_BROKER_UP)
             birth(client)
             set_state(client, "armed" if not _blocked else "blocked")
+
+        # periodic check of dfp playback status
+        if _state in ("playing", "action"):
+            try:
+                dfp_state = dfp.is_playing()
+                if dfp_state == -1:
+                    set_state(client, "IO Error")
+                elif not dfp_state:
+                    set_state(client, "armed" if not _blocked else "blocked")
+            except Exception as e:
+                print("Error checking playback status:", e)
+                set_state(client, "IO Error" if not _blocked else "blocked")
+
+        # check PIR sensor
+        if pir_latch.pending():
+            if not _blocked and _state in ("armed", "idle"):
+                _triggers += 1
+                start_action(client)
+                # dfp_play_track(client, folder=1, track=1)  # play a jump scare sound
+            else:
+                print("PIR triggered but blocked")
 
         # periodic telemetry
         now = time.ticks_ms()

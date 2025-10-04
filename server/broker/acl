@@ -5,10 +5,11 @@ topic readwrite #
 # --- Dashboard (subscribe everything; publish only to UI/control bus if you add one) ---
 user dashboard
 topic read halloween/+/availability
-topic read halloween/+/status
+topic read halloween/+/state
 topic read halloween/+/telemetry
 topic read halloween/broadcast/#
 topic read halloween/broker/uptime
+pattern write halloween/+/cmd
 topic write halloween/ui/#
 # (add or remove writes as your dashboard needs)
 
