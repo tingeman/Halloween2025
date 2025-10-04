@@ -39,6 +39,7 @@ except Exception:
     except Exception:
         secrets = None
 
+# ---- Constants ----
 FW_VERSION = "1.0.0"
 
 # OLED dimensions (set to 32 if your display is 128x32)
@@ -67,52 +68,13 @@ T_TEL   = BASE + b"/telemetry"
 T_CMD   = BASE + b"/cmd"
 T_BROKER_UP = b"halloween/broker/uptime"
 
-# ---- Globals ----
-_debug = secrets.DEBUG if hasattr(secrets, "DEBUG") else False
-_state = "idle"
-_blocked = False
-_triggers = 0
-_volume = 20
-_broker_uptime_str = "—"
-client = None           # MQTT client instance
-oled = None             # SSD1306 instance
-pir_latch = None
-
 # ---- Timezone (adjust when DST changes) ----
 TZ_OFFSET_HOURS = 2     # Denmark: 1 (CET winter), 2 (CEST summer)
 TZ_NAME = "CET/CEST"
 
 # ----------------------------
-# Utilities
+# Utilities (stateless helpers)
 # ----------------------------
-def wifi_connect(ssid: str, psk: str, timeout: int = 20) -> object:
-    """Connect the board to a Wi‑Fi access point.
-
-    Args:
-        ssid (str): SSID of the network to join.
-        psk (str): Pre-shared key / password.
-        timeout (int): Seconds to wait before raising RuntimeError.
-
-    Returns:
-        network.WLAN: The active WLAN interface object on success.
-
-    Raises:
-        RuntimeError: If the network cannot be joined within the timeout.
-    """
-    print("Wi-Fi: connecting to", ssid)
-    wlan = network.WLAN(network.STA_IF)
-    if not wlan.active():
-        wlan.active(True)
-    if not wlan.isconnected():
-        wlan.connect(ssid, psk)
-        t0 = time.ticks_ms()
-        while not wlan.isconnected():
-            if time.ticks_diff(time.ticks_ms(), t0) > timeout*1000:
-                raise RuntimeError("Wi-Fi connect timeout")
-            time.sleep(0.2)
-    print("Wi-Fi: connected", wlan.ifconfig())
-    return wlan
-
 def ensure_lib(modname: str, mip_name: object = None) -> object:
     """Ensure a Python module is available, installing it via mip if needed.
 
@@ -178,108 +140,6 @@ def draw_center(oled_obj: object, text: str, y: int) -> None:
         x = 0
     oled_obj.text(text, x, y)
 
-# ----------------------------
-# Display & MQTT helpers
-# ----------------------------
-def render_display() -> None:
-    """Render the small status screen on the global OLED.
-
-    The function reads module-level state variables such as ``_state``,
-    ``_triggers``, ``_blocked`` and ``_broker_uptime`` and updates the OLED
-    contents. If no OLED is available it is a no-op.
-    """
-    global oled, pir_latch
-
-    if oled is None:
-        return
-    oled.fill(0)
-    oled.text("Coffin v{}".format(FW_VERSION), 0, 0)
-    oled.text("State: {}".format(_state[:10]), 0, 8)
-    oled.text("Trig: {}".format(_triggers), 0, 16)
-    oled.text("PIR: {}".format("Motion!" if pir_latch.active() else "---"), 0, 24)
-    oled.text("Blk: {}".format("Y" if _blocked else "N"), 0, 32)
-    up = _broker_uptime_str
-    if len(up) > 18:
-        up = up[:18]
-    oled.text("Up: {}".format(up), 0, 40)
-    oled.show()
-
-def publish(mq: object, topic: object, payload: object, retain: bool = False) -> None:
-    """Publish a payload to ``topic`` using ``mq`` with light normalization.
-
-    The helper serializes dict/list payloads to JSON and ensures a bytes
-    payload before publishing. Exceptions are swallowed because this helper
-    is used in rendering/telemetry paths where strict error propagation would
-    complicate a tiny demo.
-
-    Args:
-        mq: MQTT client-like object with a ``publish`` method.
-        topic (bytes|str): Topic to publish to.
-        payload (str|bytes|dict|list): Payload to publish.
-        retain (bool): Whether to set the retain flag on the publish.
-    """
-    try:
-        if isinstance(payload, (dict, list)):
-            payload = json.dumps(payload)
-        if isinstance(payload, str):
-            payload = payload.encode()
-
-        try:
-            print("MQTT TX:", topic, payload)
-        except Exception:
-            pass
-
-        mq.publish(topic, payload, retain=retain, qos=0)
-    except Exception:
-        pass
-
-def set_state(mq: object, s: str) -> None:
-    """Update the local state and publish it as a retained MQTT value.
-
-    Args:
-        mq: MQTT client used to publish the state.
-        s (str): New state string.
-    """
-    global _state
-    _state = s
-    publish(mq, T_STATE, s, retain=True)
-    render_display()
-
-def birth(mq: object) -> None:
-    """Mark this device as online and set the initial state.
-
-    The function publishes an availability message (retained) and sets the
-    internal state to "idle".
-    """
-    publish(mq, T_AVAIL, b"online", retain=True)
-    set_state(mq, "idle")
-
-def lwt_setup(mq: object) -> None:
-    """Configure the MQTT Last Will and Testament (LWT).
-
-    The LWT marks the device as offline (retained) if it disconnects
-    unexpectedly.
-    """
-    mq.set_last_will(T_AVAIL, b"offline", retain=True, qos=0)
-
-def telemetry(mq: object, wlan: object) -> None:
-    """Publish a small telemetry JSON payload.
-
-    Args:
-        mq: MQTT client to use for publishing.
-        wlan: WLAN interface, used to fetch RSSI if available.
-    """
-    tel = {
-        "fw": FW_VERSION,
-        "uptime_s": time.ticks_ms()//1000,
-        "triggers": _triggers,
-        "pir": "Motion!" if pir_latch.active() else "---",
-        "blocked": _blocked,
-        "vol": _volume,
-        "rssi": wlan.status('rssi') if hasattr(wlan, "status") else None,
-    }
-    publish(mq, T_TEL, tel, retain=False)
-
 def format_uptime(seconds: int) -> str:
     """Format an uptime in seconds to a human-readable string.
 
@@ -295,354 +155,437 @@ def format_uptime(seconds: int) -> str:
     secs = rem % 60
     return f"{hours}h {mins}m {secs}s"
 
+# ----------------------------
+# Main Prop Class
+# ----------------------------
+class CoffinProp:
+    """A class to encapsulate the coffin prop's state and logic."""
 
-def on_mqtt_message(mq: object, topic: object, msg: object) -> None:
-    """MQTT callback invoked for incoming messages.
+    def __init__(self, debug=False):
+        """Initialize the prop, its state, and component placeholders."""
+        self._debug = debug
+        
+        # State
+        self.state = "booting"
+        self.is_blocked = False
+        self.triggers = 0
+        self.volume = 20
+        self.broker_uptime_str = "—"
 
-    This wrapper decodes the topic and dispatches to specific handlers
-    (commands and broker uptime messages).
+        # Components
+        self.wlan = None
+        self.mqtt = None
+        self.oled = None
+        self.pir_latch = None
+        self.dfp = None
 
-    Args:
-        mq: The MQTT client instance.
-        topic (bytes|str): Topic of the incoming message.
-        msg (bytes|str): Payload of the incoming message.
-    """
-    global _broker_uptime_str
-    try:
-        t = topic.decode() if isinstance(topic, (bytes, bytearray)) else str(topic)
-    except:
-        t = str(topic)
-    # Debug: log incoming messages to the serial console so we can see
-    # whether the uptime topic is being received and what its payload is.
-    try:
-        print("MQTT RX:", t, msg)
-    except Exception:
-        pass
-    if t == T_CMD.decode():
-        on_cmd(mq, topic, msg)
-        return
+    # ----------------------------
+    # Initialization
+    # ----------------------------
+    def _init_wifi(self) -> bool:
+        """Connect the board to a Wi‑Fi access point.
+        
+        Returns:
+            bool: True on success, False on failure.
+        """
+        if not secrets:
+            print("Wi-Fi: secrets.py not found, cannot connect.")
+            return False
+        
+        print("Wi-Fi: connecting to", secrets.WIFI_SSID)
+        self.wlan = network.WLAN(network.STA_IF)
+        if not self.wlan.active():
+            self.wlan.active(True)
+        
+        if not self.wlan.isconnected():
+            self.wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
+            t0 = time.ticks_ms()
+            while not self.wlan.isconnected():
+                if time.ticks_diff(time.ticks_ms(), t0) > 20 * 1000:
+                    print("Wi-Fi: connect timeout")
+                    self.wlan = None
+                    return False
+                time.sleep(0.2)
+        
+        print("Wi-Fi: connected", self.wlan.ifconfig())
+        return True
 
-    if t == T_BROKER_UP.decode():
-        on_broker_uptime(mq, topic, msg)
-        return
+    def _init_peripherals(self):
+        """Initialize hardware peripherals (OLED, PIR, DFPlayer)."""
+        # PIR Latch
+        try:
+            self.pir_latch = PIRLatch(
+                PIN_PIR, 
+                hold_ms=PIR_LOCKOUT_MS, 
+                debounce_ms=PIR_DEBOUNCE_MS, 
+                warmup_ms=PIR_WARMUP_MS
+            )
+            print("PIR: Initialized")
+        except Exception as e:
+            print("PIR: Failed to initialize:", e)
 
-def on_broker_uptime(mq: object, topic: object, msg: object) -> None:
-    """Handle incoming broker uptime messages.
-
-    The function expects the payload to be a JSON object with an "uptime_s"
-    field containing the broker uptime in seconds. It updates the global
-    ``_broker_uptime_str`` variable used for display.
-
-    Args:
-        mq: The MQTT client instance.
-        topic (bytes|str): Topic of the incoming message.
-        msg (bytes|str): Payload of the incoming message.
-    """
-    global _broker_uptime_str
-    try:
-        msg_json = json.loads(msg.decode()) if isinstance(msg, (bytes, bytearray)) else json.loads(str(msg))
-        # Debug: show the parsed JSON so we can see which key the broker uses
-        if _debug:
+        # OLED Display
+        try:
+            ssd1306 = ensure_lib("ssd1306")
             try:
+                i2c = I2C(0, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
+            except TypeError:
+                i2c = I2C(1, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
+            self.oled = ssd1306.SSD1306_I2C(OLED_W, OLED_H, i2c, addr=OLED_ADDR)
+            print("OLED: Initialized")
+        except Exception as e:
+            print("OLED: Failed to initialize:", e)
+
+        # DFPlayer
+        try:
+            self.dfp = dfplayer.DFPlayer(uart_id=UART_NUM, tx_pin_id=UART_TX, rx_pin_id=UART_RX)
+            self.dfp.volume(self.volume)
+            print("DFPlayer: Initialized")
+        except Exception as e:
+            print("DFPlayer: Failed to initialize:", e)
+
+    def _init_mqtt(self):
+        """Create and connect the MQTT client."""
+        if not self.wlan or not self.wlan.isconnected() or not secrets:
+            print("MQTT: No Wi-Fi or secrets, skipping connection.")
+            return
+
+        try:
+            self.mqtt = MQTTClient(
+                client_id=secrets.CLIENT_ID,
+                server=secrets.MQTT_HOST,
+                port=secrets.MQTT_PORT,
+                user=secrets.MQTT_USER,
+                password=secrets.MQTT_PASSWORD,
+                keepalive=30,
+            )
+            self.mqtt.set_last_will(T_AVAIL, b"offline", retain=True, qos=0)
+            self.mqtt.set_callback(self._on_mqtt_message)
+            self.mqtt.connect()
+            self.mqtt.subscribe(T_CMD)
+            self.mqtt.subscribe(T_BROKER_UP)
+            self._birth()
+            self.set_state("armed" if not self.is_blocked else "blocked")
+            print("MQTT: Connected and configured")
+        except Exception as e:
+            print("MQTT: Failed to connect:", e)
+            self.mqtt = None
+
+    # ----------------------------
+    # Core Logic & State
+    # ----------------------------
+    def set_state(self, new_state: str):
+        """Update the local state and publish it via MQTT if connected."""
+        self.state = new_state
+        if self.mqtt:
+            self._publish(T_STATE, new_state, retain=True)
+        self.render_display()
+
+    def _birth(self):
+        """Mark this device as online and set the initial state."""
+        if self.mqtt:
+            self._publish(T_AVAIL, b"online", retain=True)
+            self.set_state("idle")
+
+    def _start_action(self):
+        """Perform the pre-programmed action."""
+        print("ACTION: Starting...")
+        self.play_track(folder=0, track=1)
+        self.set_state("action")
+
+    # ----------------------------
+    # Display & MQTT Helpers
+    # ----------------------------
+    def render_display(self):
+        """Render the status screen on the OLED, if available."""
+        if not self.oled:
+            return
+        
+        self.oled.fill(0)
+        self.oled.text("Coffin v{}".format(FW_VERSION), 0, 0)
+        self.oled.text("State: {}".format(self.state[:10]), 0, 8)
+        self.oled.text("Trig: {}".format(self.triggers), 0, 16)
+        
+        pir_status = "---"
+        if self.pir_latch:
+            pir_status = "Motion!" if self.pir_latch.active() else "---"
+        self.oled.text("PIR: {}".format(pir_status), 0, 24)
+        
+        self.oled.text("Blk: {}".format("Y" if self.is_blocked else "N"), 0, 32)
+        
+        up = self.broker_uptime_str
+        if len(up) > 18:
+            up = up[:18]
+        self.oled.text("Up: {}".format(up), 0, 40)
+        
+        self.oled.show()
+
+    def _publish(self, topic: bytes, payload, retain: bool = False):
+        """Publish a payload to a topic with light normalization."""
+        if not self.mqtt:
+            return
+        
+        try:
+            if isinstance(payload, (dict, list)):
+                payload = json.dumps(payload)
+            if isinstance(payload, str):
+                payload = payload.encode()
+
+            if self._debug:
+                try:
+                    print("MQTT TX:", topic, payload)
+                except Exception:
+                    pass
+            
+            self.mqtt.publish(topic, payload, retain=retain, qos=0)
+        except Exception as e:
+            print("MQTT: Publish failed:", e)
+
+    def _telemetry(self):
+        """Publish a small telemetry JSON payload."""
+        tel = {
+            "fw": FW_VERSION,
+            "uptime_s": time.ticks_ms() // 1000,
+            "triggers": self.triggers,
+            "pir": "---",
+            "blocked": self.is_blocked,
+            "vol": self.volume,
+            "rssi": None,
+        }
+        if self.pir_latch:
+            tel["pir"] = "Motion!" if self.pir_latch.active() else "---"
+        if self.wlan and hasattr(self.wlan, "status"):
+            tel["rssi"] = self.wlan.status('rssi')
+        
+        self._publish(T_TEL, tel, retain=False)
+
+    # ----------------------------
+    # MQTT Message Handlers
+    # ----------------------------
+    def _on_mqtt_message(self, topic: bytes, msg: bytes):
+        """Callback for incoming MQTT messages."""
+        try:
+            t = topic.decode()
+        except:
+            t = str(topic)
+
+        if self._debug:
+            try:
+                print("MQTT RX:", t, msg)
+            except Exception:
+                pass
+
+        if t == T_CMD.decode():
+            self._on_cmd(msg)
+        elif t == T_BROKER_UP.decode():
+            self._on_broker_uptime(msg)
+
+    def _on_broker_uptime(self, msg: bytes):
+        """Handle incoming broker uptime messages."""
+        try:
+            msg_json = json.loads(msg.decode())
+            if self._debug:
                 print("Broker uptime payload JSON:", msg_json)
-            except Exception:
-                pass
 
-        raw = msg_json.get('uptime_s')
-
-        try:
+            raw = msg_json.get('uptime_s')
             broker_uptime_seconds = int(float(raw)) if raw is not None else 0
-        except Exception:
-            broker_uptime_seconds = 0
+            self.broker_uptime_str = format_uptime(broker_uptime_seconds)
 
-        _broker_uptime_str = format_uptime(broker_uptime_seconds)
+            if self._debug:
+                print("Broker uptime str:", self.broker_uptime_str)
+        except Exception as e:
+            print("Failed to parse broker uptime payload:", msg, "Error:", e)
+            self.broker_uptime_str = str(msg)
+        
+        self.render_display()
 
-        if _debug:
+    def _on_cmd(self, msg: bytes):
+        """Handle incoming command messages."""
+        try:
+            s = msg.decode()
+        except:
+            s = str(msg)
+
+        action, params = None, {}
+        if s.startswith("{"):
             try:
-                print("Broker uptime str:", _broker_uptime_str)
+                obj = json.loads(s)
+                action = obj.get("action")
+                params = obj.get("params", {})
             except Exception:
                 pass
-    except:
-        # On parse failure, fall back to a simple string representation
-        # and log the parse error for diagnostics.
-        try:
-            print("Failed to parse broker uptime payload:", msg)
-        except Exception:
-            pass
-        _broker_uptime_str = str(msg)
-
-    render_display()
-
-def dfp_set_volume(mq: object, vol: int) -> None:
-    """Set the DFPlayer volume with bounds checking.
-
-    Args:
-        vol (int): Volume level (0-30).
-    """
-    global _volume
-
-    try:
-        if 0 <= vol <= 30:
-            _volume = vol
-            dfp.volume(_volume)
         else:
-            print("Volume out of range (0-30):", vol)
-    except Exception as e:
-        print("Error setting volume:", e)
+            action = s.strip().lower()
 
-def dfp_play_track(mq: object, folder: int = 0, track: int = 1) -> None:
-    """Play a specific track number on the DFPlayer.
+        print("Command action:", action)
 
-    Args:
-        track (int): Track number to play (1-based).
-    """
-    try:
-        if track >= 1:
-            dfp.send_cmd(3, folder, track)
-            # dfp.play(folder, track)    # This command does not work properly with our board
-            set_state(mq, "playing")
-        else:
-            print("Track number must be >= 1:", track)
-    except Exception as e:
-        print("Error playing track:", e)
+        if action == "block":
+            self.is_blocked = True
+            self.set_state("blocked")
+        elif action == "unblock":
+            self.is_blocked = False
+            self.set_state("armed")
+        elif action == "reset":
+            self.triggers = 0
+            self.is_blocked = False
+            self.set_state("armed")
+        elif action == "arm":
+            if not self.is_blocked:
+                self.set_state("armed")
+        elif action == "trigger":
+            if not self.is_blocked and self.state in ("armed", "idle"):
+                self._start_action()
+        elif action == "play_music":
+            vol = params.get("volume")
+            if vol is not None:
+                self.set_volume(vol)
+            track = params.get("track", 1)
+            self.play_track(folder=0, track=track)
+        elif action == "pause_music":
+            self.pause()
+        elif action == "resume_music":
+            self.resume()
+        elif action == "stop_music":
+            self.stop()
 
-def dfp_pause(mq: object) -> None:
-    """Pause playback on the DFPlayer.
-    """
-    try:
-        dfp.send_cmd(int('0E', 16))  # Send pause command
-    except Exception as e:
-        print("Error pausing track:", e)
-
-def dfp_resume(mq: object) -> None:
-    """Resume playback on the DFPlayer.
-    """
-    try:
-        dfp.send_cmd(int('0D', 16))  # Send resume command
-        set_state(mq, "playing")
-    except Exception as e:
-        print("Error resuming track:", e)
-
-def dfp_stop(mq: object) -> None:
-    """Stop playback on the DFPlayer.
-    """
-    try:
-        dfp.send_cmd(int('16', 16))  # Send stop command
-        set_state(mq, "armed" if not _blocked else "blocked")
-    except Exception as e:
-        print("Error stopping track:", e)
-
-def start_action(mq: object) -> None:
-    """Perform preprogrammed action.
-
-    Args:
-        mq: MQTT client instance (unused except for state publishing).
-    """
-    print("starting ACTION...")
-    dfp_play_track(mq, folder=0, track=1)
-    set_state(mq, "action")
-
-def on_cmd(mq: object, topic: object, msg: object) -> None:
-    """Handle incoming command messages.
-
-    The command payload can be a simple string (e.g. "arm", "block") or a
-    JSON object with an "action" field. Only a small set of actions is
-    supported in this demo: block, unblock, reset and arm.
-
-    Args:
-        mq: MQTT client instance (unused except for state publishing).
-        topic: Topic the command arrived on.
-        msg: Payload (bytes or str).
-    """
-    global _blocked, _triggers
-    try:
-        s = msg.decode() if isinstance(msg, (bytes, bytearray)) else str(msg)
-    except:
-        s = str(msg)
-
-    action = None
-    value  = None
-    track  = None
-    params = {}
-
-    if s.startswith("{"):
-        print("Parsing JSON command:", s)
+    # ----------------------------
+    # DFPlayer Methods
+    # ----------------------------
+    def set_volume(self, vol: int):
+        """Set the DFPlayer volume with bounds checking."""
+        if not self.dfp: return
         try:
-            obj = json.loads(s)
-            action = obj.get("action")
-            value = obj.get("value", None)
-            params = obj.get("params", {})
-        except Exception:
-            pass
-
-    if action is None:
-        action = s.strip().lower()
-
-    print("Command action:", action)
-
-    if action == "block":
-        _blocked = True
-        set_state(mq, "blocked")
-    elif action == "unblock":
-        _blocked = False
-        set_state(mq, "armed")
-    elif action == "reset":
-        _triggers = 0
-    elif action == "arm":
-        if not _blocked:
-            set_state(mq, "armed")
-    elif action == "trigger":
-        if not _blocked and _state in ("armed", "idle"):
-            start_action(mq)
-    elif action == "play_music":    
-        vol = params.get("volume", None)
-        if vol is not None:
-            dfp_set_volume(mq, vol)
-        track = params.get("track", 1)
-        dfp_play_track(mq, folder=0, track=track)
-    elif action == "pause_music":
-        dfp_pause(mq)
-    elif action == "resume_music":
-        dfp_resume(mq)
-    elif action == "stop_music":
-        dfp_stop(mq)
-
-    # 'trigger' and 'volume' left out intentionally in this trimmed demo
-
-def make_client() -> object:
-    """Create and return a configured MQTTClient instance.
-
-    The function configures the LWT and sets the message callback to the
-    module-level ``on_mqtt_message`` handler.
-
-    Returns:
-        MQTTClient: Configured client (not connected).
-    """
-    c = MQTTClient(
-        client_id=secrets.CLIENT_ID,
-        server=secrets.MQTT_HOST,
-        port=secrets.MQTT_PORT,
-        user=secrets.MQTT_USER,
-        password=secrets.MQTT_PASSWORD,
-        keepalive=30,
-    )
-    lwt_setup(c)
-    c.set_callback(lambda t, m: on_mqtt_message(c, t, m))
-    return c
-
-# ----------------------------
-# Main
-# ----------------------------
-def main() -> None:
-    """Main entrypoint for the device firmware.
-
-    Connects to Wi‑Fi, initializes the display, connects to MQTT and enters a
-    small loop that processes incoming MQTT messages and periodically emits
-    telemetry. The function catches MQTT errors and performs a simple
-    automatic reconnect sequence.
-    """
-    global client, oled, dfp, pir_latch, _blocked, _triggers, _volume, _state, _broker_uptime_str
-
-    # Wi-Fi first (needed if ensure_lib uses mip)
-    wlan = wifi_connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
-
-    # Initialize PIR early, so it is available for display updates
-    pir_latch = PIRLatch(PIN_PIR, 
-                         hold_ms=PIR_LOCKOUT_MS, 
-                         debounce_ms=PIR_DEBOUNCE_MS, 
-                         warmup_ms=PIR_WARMUP_MS
-                         )    
-    # Sensor motion = HIGH (3.3V)
-    # Sensor idle   = LOW  (0V)
-
-
-    # Ensure OLED driver present, init I2C + OLED ONCE (global)
-    ssd1306 = ensure_lib("ssd1306")
-    try:
-        i2c = I2C(0, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
-    except TypeError:
-        i2c = I2C(1, sda=machine.Pin(I2C_SDA), scl=machine.Pin(I2C_SCL), freq=400_000)
-    oled = ssd1306.SSD1306_I2C(OLED_W, OLED_H, i2c, addr=OLED_ADDR)
-
-    # Initialize DFPlayer (global)
-    dfp = dfplayer.DFPlayer(uart_id=UART_NUM, tx_pin_id=UART_TX, rx_pin_id=UART_RX)
-    dfp.volume(_volume)  # reasonable default; override via MQTT
-
-    # Splash
-    ip = wlan.ifconfig()[0]
-    oled.fill(0)
-    oled.text("ESP32 + Coffin", 0, 0)
-    oled.text("IP: " + ip, 0, 8)
-    oled.text("Syncing NTP...", 0, 24)
-    oled.show()
-
-    # NTP time syncing (optional)
-    try:
-        import ntptime
-        ntptime.settime()
-        print("NTP: synced")
-    except Exception as e:
-        print("NTP error:", e)
-
-    # MQTT connect + subscribe
-    if client is None:
-        client = make_client()
-        client.connect()
-        client.subscribe(T_CMD)
-        client.subscribe(T_BROKER_UP)
-        birth(client)
-        set_state(client, "armed" if not _blocked else "blocked")
-
-    # Main loop
-    last_tel = 0
-    while True:
-        # pump MQTT to receive messages (like broker uptime)
-        try:
-            client.check_msg()
-        except Exception:
-            # quick auto-recover
-            try:
-                client.disconnect()
-            except:
-                pass
-            client = None
-            time.sleep(1)
-            client = make_client()
-            client.connect()
-            client.subscribe(T_CMD)
-            client.subscribe(T_BROKER_UP)
-            birth(client)
-            set_state(client, "armed" if not _blocked else "blocked")
-
-        # periodic check of dfp playback status
-        if _state in ("playing", "action"):
-            try:
-                dfp_state = dfp.is_playing()
-                if dfp_state == -1:
-                    set_state(client, "IO Error")
-                elif not dfp_state:
-                    set_state(client, "armed" if not _blocked else "blocked")
-            except Exception as e:
-                print("Error checking playback status:", e)
-                set_state(client, "IO Error" if not _blocked else "blocked")
-
-        # check PIR sensor
-        if pir_latch.pending():
-            if not _blocked and _state in ("armed", "idle"):
-                _triggers += 1
-                start_action(client)
-                # dfp_play_track(client, folder=1, track=1)  # play a jump scare sound
+            if 0 <= vol <= 30:
+                self.volume = vol
+                self.dfp.volume(self.volume)
             else:
-                print("PIR triggered but blocked")
+                print("Volume out of range (0-30):", vol)
+        except Exception as e:
+            print("Error setting volume:", e)
 
-        # periodic telemetry
-        now = time.ticks_ms()
-        if time.ticks_diff(now, last_tel) > 5000:
-            telemetry(client, wlan)
-            last_tel = now
+    def play_track(self, folder: int = 0, track: int = 1):
+        """Play a specific track on the DFPlayer."""
+        if not self.dfp: return
+        try:
+            if track >= 1:
+                self.dfp.send_cmd(3, folder, track)
+                self.set_state("playing")
+            else:
+                print("Track number must be >= 1:", track)
+        except Exception as e:
+            print("Error playing track:", e)
 
-        render_display()
-        time.sleep(0.1)
+    def pause(self):
+        """Pause playback on the DFPlayer."""
+        if not self.dfp: return
+        try:
+            self.dfp.send_cmd(int('0E', 16))
+        except Exception as e:
+            print("Error pausing track:", e)
+
+    def resume(self):
+        """Resume playback on the DFPlayer."""
+        if not self.dfp: return
+        try:
+            self.dfp.send_cmd(int('0D', 16))
+            self.set_state("playing")
+        except Exception as e:
+            print("Error resuming track:", e)
+
+    def stop(self):
+        """Stop playback on the DFPlayer."""
+        if not self.dfp: return
+        try:
+            self.dfp.send_cmd(int('16', 16))
+            self.set_state("armed" if not self.is_blocked else "blocked")
+        except Exception as e:
+            print("Error stopping track:", e)
+
+    # ----------------------------
+    # Main Loop
+    # ----------------------------
+    def run(self):
+        """Main entrypoint for the device firmware."""
+        # 1. Initialize peripherals
+        self._init_peripherals()
+
+        # 2. Splash screen
+        if self.oled:
+            self.oled.fill(0)
+            self.oled.text("ESP32 + Coffin", 0, 0)
+            self.oled.text("Connecting...", 0, 16)
+            self.oled.show()
+
+        # 3. Connect to Wi-Fi
+        self._init_wifi()
+        if self.oled:
+            ip = self.wlan.ifconfig()[0] if self.wlan else "Offline"
+            self.oled.fill(0)
+            self.oled.text("ESP32 + Coffin", 0, 0)
+            self.oled.text("IP: " + ip, 0, 8)
+            self.oled.show()
+
+        # 4. Sync NTP if online
+        if self.wlan:
+            try:
+                import ntptime
+                ntptime.settime()
+                print("NTP: synced")
+            except Exception as e:
+                print("NTP error:", e)
+
+        # 5. Connect to MQTT if online
+        self._init_mqtt()
+        self.set_state("armed" if not self.is_blocked else "blocked")
+
+        # 6. Main loop
+        last_tel = 0
+        while True:
+            # Pump MQTT if connected
+            if self.mqtt:
+                try:
+                    self.mqtt.check_msg()
+                except Exception:
+                    print("MQTT: Reconnecting...")
+                    try: self.mqtt.disconnect() 
+                    except: pass
+                    time.sleep(1)
+                    self._init_mqtt()
+
+            # Check DFPlayer playback status
+            if self.dfp and self.state in ("playing", "action"):
+                try:
+                    if not self.dfp.is_playing():
+                        self.set_state("armed" if not self.is_blocked else "blocked")
+                except Exception as e:
+                    print("Error checking playback status:", e)
+                    self.set_state("IO Error")
+
+            # Check PIR sensor
+            if self.pir_latch and self.pir_latch.pending():
+                if not self.is_blocked and self.state in ("armed", "idle"):
+                    self.triggers += 1
+                    self._start_action()
+                else:
+                    print("PIR triggered but blocked")
+
+            # Periodic telemetry
+            now = time.ticks_ms()
+            if self.mqtt and time.ticks_diff(now, last_tel) > 5000:
+                self._telemetry()
+                last_tel = now
+
+            self.render_display()
+            time.sleep(0.1)
+
+# ----------------------------
+# Entrypoint
+# ----------------------------
+def main():
+    """Instantiates and runs the prop."""
+    debug = secrets.DEBUG if hasattr(secrets, "DEBUG") else False
+    prop = CoffinProp(debug=debug)
+    prop.run()
 
 # Entry
 if __name__ == "__main__":
@@ -675,17 +618,18 @@ if __name__ == "__main__":
         draw_center(d, "OK", 10)
         assert any(c[0] == "OK" for c in d.calls), "draw_center did not call text()"
 
-        # publish() serialisation test
+        # _publish() serialisation test
         class DummyMQ:
             def __init__(self):
                 self.publ = []
             def publish(self, topic, payload, retain=False, qos=0):
                 self.publ.append((topic, payload, retain, qos))
 
-        dm = DummyMQ()
-        publish(dm, b'topic', {'a': 1}, retain=True)
-        assert dm.publ, "publish did not invoke underlying publish()"
-        payload = dm.publ[0][1]
+        prop = CoffinProp(debug=False)
+        prop.mqtt = DummyMQ()
+        prop._publish(b'topic', {'a': 1}, retain=True)
+        assert prop.mqtt.publ, "_publish did not invoke underlying publish()"
+        payload = prop.mqtt.publ[0][1]
         assert isinstance(payload, (bytes, bytearray)) and payload.startswith(b'{') and b'"a"' in payload
 
         # ensure_lib should at least import stdlib json on CPython
