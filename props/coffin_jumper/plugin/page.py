@@ -55,9 +55,12 @@ class Plugin(BasePlugin):
                 html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])])
             ]),
             html.Div(className="d-flex gap-2", children=[
-                dcc.Input(id="cj-volume", type="number", min=0, max=30, value=20, placeholder="volume"),
                 html.Button("Trigger", id="cj-trigger", n_clicks=0),
                 html.Button("Play", id="cj-play", n_clicks=0),
+                html.Button("Stop playing", id="cj-stop", n_clicks=0),
+                html.Button("Reset", id="cj-reset", n_clicks=0),
+                dcc.Input(id="cj-volume", type="number", min=0, max=30, value=20, placeholder="volume", style={"width": "4em"} ),
+                html.Button("Set Volume", id="cj-set-volume", n_clicks=0),
             ])
         ])
 
@@ -125,6 +128,26 @@ class Plugin(BasePlugin):
             State("cj-volume", "value"),
             prevent_initial_call=True,
         )(self._play)
+
+        app.callback(
+            Output("cj-stop", "n_clicks"),
+            Input("cj-stop", "n_clicks"),
+            prevent_initial_call=True,
+        )(self._stop_playing)
+
+        app.callback(
+            Output("cj-reset", "n_clicks"),
+            Input("cj-reset", "n_clicks"),
+            State("cj-volume", "value"),
+            prevent_initial_call=True,
+        )(self._reset_prop)
+
+        app.callback(
+            Output("cj-set-volume", "n_clicks"),
+            Input("cj-set-volume", "n_clicks"),
+            State("cj-volume", "value"),
+            prevent_initial_call=True,
+        )(self._set_volume)
 
 
     def _on_telem(self, topic, payload: bytes):
@@ -223,6 +246,31 @@ class Plugin(BasePlugin):
     def _play(self, _, volume):
         """Handle Play button presses and publish MQTT 'play' command."""
         cmd = {"action": "play_music"}
+        if volume is not None:
+            cmd["params"] = {"volume": int(volume)}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _set_volume(self, n_clicks, volume):
+        """Handle Set Volume button presses and publish MQTT 'set_volume' command."""
+        if volume is None:
+            return 0  # ignore if no volume provided
+        cmd = {"action": "set_volume", "params": {"volume": int(volume)}}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _stop_playing(self, _):
+        """Handle Stop button presses and publish MQTT 'stop' command."""
+        cmd = {"action": "stop_music"}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _reset_prop(self, _, volume):
+        """Handle Reset button presses and publish MQTT 'reset' command."""
+        cmd = {"action": "reset"}
         if volume is not None:
             cmd["params"] = {"volume": int(volume)}
         # publish using helper made available by BasePlugin
