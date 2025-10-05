@@ -18,6 +18,7 @@ a full production-grade MQTT client.
 """
 
 import time, json
+
 try:
     # MicroPython-specific modules
     import network, machine, ubinascii  # type: ignore
@@ -47,6 +48,13 @@ MAX_RECONNECT_INTERVAL = 5 * 60 * 1000  # 5 minutes max backoff (given in ms)
 ACTION_FOLDER = 0
 ACTION_TRACK = 1
 
+PIR_LOCKOUT_MS = 5000    # Minimum ms between triggers (sensor-level default)
+PIR_DEBOUNCE_MS= 300     # Debounce time for PIR edges (minimum time between edges)
+PIR_WARMUP_MS  = 5000    # Ignore PIR edges for this long after boot
+
+# Prop-level policy: how long to ignore any retriggers after starting an action
+ACTION_LOCKOUT_MS = 7000  # e.g. keep action lockout separate and possibly longer
+
 # OLED dimensions (set to 32 if your display is 128x32)
 OLED_W = 128
 OLED_H = 64
@@ -54,9 +62,6 @@ OLED_ADDR = 0x3C
 
 # ---- Pins ----
 PIN_PIR        = 4       # PIR output (3.3V logic!) 
-PIR_LOCKOUT_MS = 5000    # Minimum ms between triggers
-PIR_DEBOUNCE_MS= 300     # Debounce time for PIR edges (minimum time between edges)
-PIR_WARMUP_MS  = 5000    # Ignore PIR edges for this long after boot
 PIN_SOLENOID   = 2       # MOSFET gate         (Connect to GPIO2)
 UART_NUM       = 2       # DFPlayer UART
 UART_TX        = 17      # ESP32 TX -> DF RX   (Updated per board)
@@ -176,6 +181,7 @@ class CoffinProp:
         self.triggers = 0
         self.volume = 20
         self.broker_uptime_str = "—"
+        self._last_action_start_ms = None
 
         # Reconnection backoff state
         self._next_wifi_reconnect_ms = 0
@@ -328,6 +334,104 @@ class CoffinProp:
         self.set_state("action")
         print("ACTION started and state set to 'action'.")
 
+    def _stop_action(self):
+        """Clean up after the action is finished."""
+        print("ACTION: Stopping...")
+        if self.solenoid_pin:
+            self.solenoid_pin.value(0)  # Deactivate solenoid
+        
+        # ensure the player is stopped
+        if self.dfp:
+            self.dfp.stop()
+
+        self.set_state("armed" if not self.is_blocked else "blocked")
+        print("ACTION: Stopped and state reset.")
+
+    def _check_action_status(self):
+        """If an action is running, check if it has completed."""
+        if self.state != "action":
+            return
+
+        action_is_ongoing = False
+        try:
+            # Condition 1: DFPlayer is playing
+            if self.dfp and self.dfp.is_playing():
+                action_is_ongoing = True
+            
+            # Future condition 2: Check another sensor (e.g., PIR)
+            # if self.some_other_sensor.is_active():
+            #     action_is_ongoing = True
+
+        except Exception as e:
+            print("Error checking action status:", e)
+            self.set_state("IO Error")
+            # If there's an error, we should probably stop the action
+            action_is_ongoing = False
+
+        if not action_is_ongoing:
+            self._stop_action()
+
+    def _process_triggers(self, now):
+        """Check trigger conditions and start an action if appropriate.
+
+        Uses timestamp-based lockout instead of blocking sleep so the main loop
+        can continue processing MQTT, display, etc.
+        """
+        if not self.pir_latch:
+            return
+
+        # If PIR has a pending edge, funnel it through request_trigger
+        if self.pir_latch.pending():
+            accepted = self.request_trigger(now=now, source="pir")
+            if not accepted:
+                # still consume a small debounce so pending doesn't immediately reappear
+                try:
+                    self.pir_latch.consume_for(PIR_DEBOUNCE_MS)
+                except Exception:
+                    pass
+                
+    def request_trigger(self, now=None, source="remote") -> bool:
+        """Attempt to start an action triggered from 'source' ('pir'|'remote'|'mqtt').
+
+        Returns True if the trigger was accepted and the action started, False otherwise.
+        This centralizes lockout/state/blocked checks so all trigger paths behave the same.
+        """
+        if now is None:
+            now = time.ticks_ms()
+
+        # Prop-level lockout (prevents retrigger while action runs / covers non-PIR triggers)
+        if self._last_action_start_ms and time.ticks_diff(now, self._last_action_start_ms) < ACTION_LOCKOUT_MS:
+            return False
+
+        if self.state == "action":
+            return False
+
+        if self.is_blocked:
+            return False
+
+        # Accept trigger
+        self.triggers += 1
+        self._start_action()
+        self._last_action_start_ms = time.ticks_ms()
+
+        # Quiet the PIR to avoid immediate re-triggering:
+        try:
+            if self.pir_latch:
+                if source == "pir":
+                    # # short debounce for PIR-originated edge
+                    # self.pir_latch.consume_for(PIR_DEBOUNCE_MS)
+                    # Currently we use the same ACTION_LOCKOUT_MS for simplicity
+                    self.pir_latch.consume_for(ACTION_LOCKOUT_MS)
+                else:
+                    # remote trigger: keep PIR quiet for the action lockout to avoid
+                    # re-triggering while action runs
+                    self.pir_latch.consume_for(ACTION_LOCKOUT_MS)
+        except Exception:
+            pass
+
+        return True
+
+
     # ----------------------------
     # Display & MQTT Helpers
     # ----------------------------
@@ -392,7 +496,7 @@ class CoffinProp:
         if self.pir_latch:
             tel["pir"] = "Motion!" if self.pir_latch.active() else "---"
 
-        if self.relay:
+        if self.solenoid_pin is not None:
             # relay is really a MOSFET, driven by SOLENOID pin
             tel["solenoid_pin_state"] = "High" if self.solenoid_pin.value() else "Low"
             tel["solenoid_power"] = "On" if self.solenoid_pin.value() else "Off"
@@ -463,6 +567,7 @@ class CoffinProp:
         print("Command action:", action)
 
         if action == "block":
+            self._stop_action()
             self.is_blocked = True
             self.set_state("blocked")
         elif action == "unblock":
@@ -476,8 +581,13 @@ class CoffinProp:
             if not self.is_blocked:
                 self.set_state("armed")
         elif action == "trigger":
-            if not self.is_blocked and self.state in ("armed", "idle"):
-                self._start_action()
+            now = time.ticks_ms()
+            accepted = self.request_trigger(now=now, source="mqtt")
+            if not accepted:
+                print("Remote trigger rejected (blocked/lockout/state).")
+        elif action == "stop_action":
+            if self.state == "action":
+                self._stop_action()
         elif action == "play_music":
             vol = params.get("volume")
             if vol is not None:
@@ -664,24 +774,11 @@ class CoffinProp:
                     self._next_mqtt_reconnect_ms = now # Schedule immediate reconnect attempt
 
             # --- Core Prop Logic ---
-            # Check DFPlayer playback status
-            if self.dfp and self.state in ("playing", "action"):
-                try:
-                    if not self.dfp.is_playing():
-                        print("DFPlayer: Playback finished. Setting state to idle/armed.")
-                        self.set_state("armed" if not self.is_blocked else "blocked")
-                except Exception as e:
-                    print("Error checking playback status:", e)
-                    self.set_state("IO Error")
+            # Check and process current action status
+            self._check_action_status()
 
-            # Check PIR sensor
-            if self.pir_latch and self.pir_latch.pending():
-                if not self.is_blocked and self.state in ("armed", "idle"):
-                    self.triggers += 1
-                    self._start_action()
-                    self.sleep(5, verbose=True)   # Simple debounce after action start
-                else:
-                    print("PIR triggered but blocked")
+            # Process triggers (PIR sensor)
+            self._process_triggers(now)
 
             # Periodic telemetry
             if self.mqtt and time.ticks_diff(now, last_tel) > TELEMETRY_INTERVAL_MS:

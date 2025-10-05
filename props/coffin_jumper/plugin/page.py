@@ -54,11 +54,15 @@ class Plugin(BasePlugin):
             html.Table(id="cj-telem", children=[
                 html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])])
             ]),
-            html.Div(className="d-flex gap-2", children=[
+            html.Div(className="d-flex gap-2 mb-2", children=[
                 html.Button("Trigger", id="cj-trigger", n_clicks=0),
+                html.Button("Stop Action", id="cj-stop-action", n_clicks=0),
+                html.Button("Block", id="cj-block", n_clicks=0),
+                html.Button("Reset", id="cj-reset", n_clicks=0),
+            ]),
+            html.Div(className="d-flex gap-2", children=[
                 html.Button("Play", id="cj-play", n_clicks=0),
                 html.Button("Stop playing", id="cj-stop", n_clicks=0),
-                html.Button("Reset", id="cj-reset", n_clicks=0),
                 dcc.Input(id="cj-volume", type="number", min=0, max=30, value=20, placeholder="volume", style={"width": "4em"} ),
                 html.Button("Set Volume", id="cj-set-volume", n_clicks=0),
             ])
@@ -121,7 +125,32 @@ class Plugin(BasePlugin):
             State("cj-volume", "value"),
             prevent_initial_call=True,
         )(self._trigger)
-        
+
+        app.callback(
+            Output("cj-stop-action", "n_clicks"),
+            Input("cj-stop-action", "n_clicks"),
+            prevent_initial_call=True,
+        )(self._stop_action)
+
+        app.callback(
+            Output("cj-block", "n_clicks"),
+            Input("cj-block", "n_clicks"),
+            prevent_initial_call=True,
+        )(self._block)
+
+        # Periodic render for block button label (to show if blocking or not)
+        app.callback(
+            Output("cj-block", "children"),
+            Input(self._tick, "n_intervals"),
+        )(self._render_block_label)
+
+        app.callback(
+            Output("cj-reset", "n_clicks"),
+            Input("cj-reset", "n_clicks"),
+            State("cj-volume", "value"),
+            prevent_initial_call=True,
+        )(self._reset_prop)
+
         app.callback(
             Output("cj-play", "n_clicks"),
             Input("cj-play", "n_clicks"),
@@ -134,13 +163,6 @@ class Plugin(BasePlugin):
             Input("cj-stop", "n_clicks"),
             prevent_initial_call=True,
         )(self._stop_playing)
-
-        app.callback(
-            Output("cj-reset", "n_clicks"),
-            Input("cj-reset", "n_clicks"),
-            State("cj-volume", "value"),
-            prevent_initial_call=True,
-        )(self._reset_prop)
 
         app.callback(
             Output("cj-set-volume", "n_clicks"),
@@ -225,13 +247,15 @@ class Plugin(BasePlugin):
     def _render_state(self, _):
         """Render the state badge as a colored inline element."""
         s = (self.cache.get("cj_state") or "unknown").lower()
-        if s in ("idle", "ready"):
+        if s in ("idle", "ready", "armed"):
             # Bootstrap green badge
             return html.Span(s, className="badge bg-success text-white")
-        if s in ("jumping", "playing"):
+        if s in ("action", "jumping", "playing"):
             return html.Span(s, className="badge bg-primary text-white")
         if s in ("IO Error", "error", "fault"):
             return html.Span(s, className="badge bg-danger text-white")
+        if s in ("blocked", "blocking"):
+            return html.Span(s, className="badge bg-warning text-dark")
         return html.Span(s, className="badge bg-secondary text-white")
 
     def _trigger(self, _, volume):
@@ -239,6 +263,40 @@ class Plugin(BasePlugin):
         cmd = {"action": "trigger"}
         if volume is not None:
             cmd = {"action": "trigger", "params": {"volume": int(volume)}}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _stop_action(self, _):
+        """Handle Stop Action button presses and publish MQTT 'stop_action' command."""
+        cmd = {"action": "stop_action"}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _render_block_label(self, _):
+        """Return the button label based on the cached state (blocked vs not)."""
+        s = (self.cache.get("cj_state") or "").lower()
+        if s == "blocked":
+            return "Unblock"
+        return "Block"
+    
+    def _block(self, _):
+        """Handle Block button presses and publish MQTT 'block' or 'unblock' command."""
+        s = (self.cache.get("cj_state") or "").lower()
+        if s == "blocked":
+            cmd = {"action": "unblock"}
+        else:
+            cmd = {"action": "block"}
+        # publish using helper made available by BasePlugin
+        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
+        return 0
+
+    def _reset_prop(self, _, volume):
+        """Handle Reset button presses and publish MQTT 'reset' command."""
+        cmd = {"action": "reset"}
+        if volume is not None:
+            cmd["params"] = {"volume": int(volume)}
         # publish using helper made available by BasePlugin
         self.mqtt_publish(self.T_CMD, json.dumps(cmd))
         return 0
@@ -264,15 +322,6 @@ class Plugin(BasePlugin):
     def _stop_playing(self, _):
         """Handle Stop button presses and publish MQTT 'stop' command."""
         cmd = {"action": "stop_music"}
-        # publish using helper made available by BasePlugin
-        self.mqtt_publish(self.T_CMD, json.dumps(cmd))
-        return 0
-
-    def _reset_prop(self, _, volume):
-        """Handle Reset button presses and publish MQTT 'reset' command."""
-        cmd = {"action": "reset"}
-        if volume is not None:
-            cmd["params"] = {"volume": int(volume)}
         # publish using helper made available by BasePlugin
         self.mqtt_publish(self.T_CMD, json.dumps(cmd))
         return 0
