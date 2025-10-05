@@ -1,6 +1,20 @@
 import machine
 import time
 
+# DFPlayer Command Constants
+
+DFP_CMD_VOL_UP = 0x04        # increase volume
+DFP_CMD_VOL_DOWN = 0x05      # decrease volume
+DFP_CMD_VOL = 0x06           # set volume (one argument)
+DFP_CMD_RESET = 0x0C         # reset the module
+DFP_CMD_RESUME = 0x0D        # resume playback
+DFP_CMD_PAUSE = 0x0E         # pause playback
+DFP_CMD_PLAY = 0x0F          # play a specific track in a specific folder (two arguments)
+DFP_CMD_STOP = 0x16          # stop playback
+DFP_CMD_IS_PLAYING = 0x42    # check if something is playing
+DFP_CMD_GET_VOL = 0x43       # get current volume
+DFP_CMD_GET_FILES = 0x4E     # get number of files in folder
+
 class DFPlayer:
     def __init__(self,uart_id,tx_pin_id=None,rx_pin_id=None):
         self.uart_id=uart_id
@@ -51,42 +65,48 @@ class DFPlayer:
         self.uart.write(out_bytes)
 
     def stop(self):
-        self.send_cmd(22,0,0)
-        
+        self.send_cmd(DFP_CMD_STOP,0,0)
+
     def play(self,folder,file):
         self.stop()
         time.sleep(0.05)
-        self.send_cmd(15,folder,file)
+        self.send_cmd(DFP_CMD_PLAY,folder,file)
+
+    def pause(self):
+        self.send_cmd(DFP_CMD_PAUSE, 0, 0)
+
+    def resume(self):
+        self.send_cmd(DFP_CMD_RESUME, 0, 0)
         
     def volume(self,vol):
-        self.send_cmd(6,0,vol)
+        self.send_cmd(DFP_CMD_VOL,0,vol)
         
     def volume_up(self):
-        self.send_cmd(4,0,0)
+        self.send_cmd(DFP_CMD_VOL_UP,0,0)
 
     def volume_down(self):
-        self.send_cmd(5,0,0)
+        self.send_cmd(DFP_CMD_VOL_DOWN,0,0)
     
     def reset(self):
-        self.send_cmd(12,0,1)
+        self.send_cmd(DFP_CMD_RESET,0,1)
         
     def is_playing(self):
-        in_bytes = self.send_query(66)
+        in_bytes = self.send_query(DFP_CMD_IS_PLAYING)
         if in_bytes==-1 or in_bytes[5]!=2:
             return -1
         return in_bytes[6]
     
     def get_volume(self):
-        in_bytes = self.send_query(67)
-        if in_bytes==-1 or in_bytes[3]!=67:
+        in_bytes = self.send_query(DFP_CMD_GET_VOL)
+        if in_bytes==-1 or in_bytes[3]!=DFP_CMD_GET_VOL:
             return -1
         return in_bytes[6]
 
     def get_files_in_folder(self,folder):
-        in_bytes = self.send_query(78,0,folder)
+        in_bytes = self.send_query(DFP_CMD_GET_FILES,0,folder)
         if in_bytes==-1:
             return -1
-        if in_bytes[3]!=78:
+        if in_bytes[3]!=DFP_CMD_GET_FILES:
             return 0
         return in_bytes[6]
 

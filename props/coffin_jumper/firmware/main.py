@@ -26,6 +26,7 @@ try:
     import secrets  # device secrets on the target
     import dfplayer  # MANUAL INSTALL NEEDED! DOESN'T COME WITH MIP
     from pir_hcsr501 import PIRLatch
+    import ntptime  # type: ignore
 except Exception:
     # Provide fallbacks so the module can be imported on CPython for tests.
     network = None
@@ -41,6 +42,10 @@ except Exception:
 
 # ---- Constants ----
 FW_VERSION = "1.0.0"
+TELEMETRY_INTERVAL_MS = 5000
+MAX_RECONNECT_INTERVAL = 5 * 60 * 1000  # 5 minutes max backoff (given in ms)
+ACTION_FOLDER = 1
+ACTION_TRACK = 1
 
 # OLED dimensions (set to 32 if your display is 128x32)
 OLED_W = 128
@@ -172,6 +177,12 @@ class CoffinProp:
         self.volume = 20
         self.broker_uptime_str = "—"
 
+        # Reconnection backoff state
+        self._next_wifi_reconnect_ms = 0
+        self._wifi_reconnect_attempts = 0
+        self._next_mqtt_reconnect_ms = 0
+        self._mqtt_reconnect_attempts = 0
+
         # Components
         self.wlan = None
         self.mqtt = None
@@ -209,6 +220,15 @@ class CoffinProp:
         
         print("Wi-Fi: connected", self.wlan.ifconfig())
         return True
+
+    def _init_get_ntp_time(self):
+        # 4. Sync NTP if online
+        if self.wlan:
+            try:
+                ntptime.settime()
+                print("NTP: synced")
+            except Exception as e:
+                print("NTP error:", e)
 
     def _init_peripherals(self):
         """Initialize hardware peripherals (OLED, PIR, DFPlayer)."""
@@ -267,8 +287,12 @@ class CoffinProp:
             self._birth()
             self.set_state("armed" if not self.is_blocked else "blocked")
             print("MQTT: Connected and configured")
+            self._mqtt_reconnect_attempts = 0  # Reset on success
         except Exception as e:
             print("MQTT: Failed to connect:", e)
+            if self.mqtt:
+                try: self.mqtt.disconnect()
+                except: pass
             self.mqtt = None
 
     # ----------------------------
@@ -290,8 +314,9 @@ class CoffinProp:
     def _start_action(self):
         """Perform the pre-programmed action."""
         print("ACTION: Starting...")
-        self.play_track(folder=0, track=1)
+        self.play_track(folder=ACTION_FOLDER, track=ACTION_TRACK)
         self.set_state("action")
+        print("ACTION started and state set to 'action'.")
 
     # ----------------------------
     # Display & MQTT Helpers
@@ -468,7 +493,7 @@ class CoffinProp:
         if not self.dfp: return
         try:
             if track >= 1:
-                self.dfp.send_cmd(3, folder, track)
+                self.dfp.play(folder, track)
                 self.set_state("playing")
             else:
                 print("Track number must be >= 1:", track)
@@ -479,7 +504,7 @@ class CoffinProp:
         """Pause playback on the DFPlayer."""
         if not self.dfp: return
         try:
-            self.dfp.send_cmd(int('0E', 16))
+            self.dfp.pause()
         except Exception as e:
             print("Error pausing track:", e)
 
@@ -487,7 +512,7 @@ class CoffinProp:
         """Resume playback on the DFPlayer."""
         if not self.dfp: return
         try:
-            self.dfp.send_cmd(int('0D', 16))
+            self.dfp.resume()
             self.set_state("playing")
         except Exception as e:
             print("Error resuming track:", e)
@@ -496,10 +521,19 @@ class CoffinProp:
         """Stop playback on the DFPlayer."""
         if not self.dfp: return
         try:
-            self.dfp.send_cmd(int('16', 16))
+            self.dfp.stop()
             self.set_state("armed" if not self.is_blocked else "blocked")
         except Exception as e:
             print("Error stopping track:", e)
+
+    # ----------------------------
+    # Reconnection Backoff
+    # ----------------------------
+    def _get_backoff_delay_ms(self, attempts: int) -> int:
+        """Calculate exponential backoff delay with a cap."""
+        # Exponential backoff: 2s, 4s, 8s, 16s, ..., up to 5 mins
+        delay = min(MAX_RECONNECT_INTERVAL, (2 ** attempts) * 1000)
+        return delay
 
     # ----------------------------
     # Main Loop
@@ -518,6 +552,7 @@ class CoffinProp:
 
         # 3. Connect to Wi-Fi
         self._init_wifi()
+        self._init_get_ntp_time()
         if self.oled:
             ip = self.wlan.ifconfig()[0] if self.wlan else "Offline"
             self.oled.fill(0)
@@ -525,37 +560,65 @@ class CoffinProp:
             self.oled.text("IP: " + ip, 0, 8)
             self.oled.show()
 
-        # 4. Sync NTP if online
-        if self.wlan:
-            try:
-                import ntptime
-                ntptime.settime()
-                print("NTP: synced")
-            except Exception as e:
-                print("NTP error:", e)
-
-        # 5. Connect to MQTT if online
+        # 4. Connect to MQTT if online
         self._init_mqtt()
         self.set_state("armed" if not self.is_blocked else "blocked")
 
-        # 6. Main loop
+        # 5. Main loop
         last_tel = 0
         while True:
-            # Pump MQTT if connected
+            now = time.ticks_ms()
+
+            # --- Handle Wi-Fi and MQTT Connections with Backoff ---
+            # 1. Check Wi-Fi status
+            if not self.wlan or not self.wlan.isconnected():
+                if self.mqtt:
+                    try: self.mqtt.disconnect()
+                    except: pass
+                    self.mqtt = None
+                    print("Wi-Fi: Connection lost, MQTT disconnected.")
+                
+                if time.ticks_diff(now, self._next_wifi_reconnect_ms) >= 0:
+                    print("Wi-Fi: Attempting to reconnect...")
+                    if self._init_wifi():
+                        print("Wi-Fi: Reconnected.")
+                        self._wifi_reconnect_attempts = 0
+                        self._next_mqtt_reconnect_ms = now # Try MQTT connect right away
+                        self._init_get_ntp_time()
+                    else:
+                        self._wifi_reconnect_attempts += 1
+                        delay = self._get_backoff_delay_ms(self._wifi_reconnect_attempts)
+                        self._next_wifi_reconnect_ms = time.ticks_add(now, delay)
+                        print(f"Wi-Fi: Reconnect failed. Retrying in {delay//1000}s.")
+                 
+            # 2. Check MQTT status (only if Wi-Fi is up)
+            elif not self.mqtt:
+                if time.ticks_diff(now, self._next_mqtt_reconnect_ms) >= 0:
+                    print("MQTT: Attempting to connect...")
+                    self._init_mqtt()
+                    if not self.mqtt:
+                        self._mqtt_reconnect_attempts += 1
+                        delay = self._get_backoff_delay_ms(self._mqtt_reconnect_attempts)
+                        self._next_mqtt_reconnect_ms = time.ticks_add(now, delay)
+                        print(f"MQTT: Connection failed. Retrying in {delay//1000}s.")
+
+            # 3. Pump MQTT messages if connected
             if self.mqtt:
                 try:
                     self.mqtt.check_msg()
-                except Exception:
-                    print("MQTT: Reconnecting...")
-                    try: self.mqtt.disconnect() 
+                except Exception as e:
+                    print(f"MQTT: check_msg error: {e}. Disconnecting.")
+                    try: self.mqtt.disconnect()
                     except: pass
-                    time.sleep(1)
-                    self._init_mqtt()
+                    self.mqtt = None
+                    self._next_mqtt_reconnect_ms = now # Schedule immediate reconnect attempt
 
+            # --- Core Prop Logic ---
             # Check DFPlayer playback status
             if self.dfp and self.state in ("playing", "action"):
                 try:
                     if not self.dfp.is_playing():
+                        print("DFPlayer: Playback finished. Setting state to idle/armed.")
                         self.set_state("armed" if not self.is_blocked else "blocked")
                 except Exception as e:
                     print("Error checking playback status:", e)
@@ -570,10 +633,10 @@ class CoffinProp:
                     print("PIR triggered but blocked")
 
             # Periodic telemetry
-            now = time.ticks_ms()
-            if self.mqtt and time.ticks_diff(now, last_tel) > 5000:
+            if self.mqtt and time.ticks_diff(now, last_tel) > TELEMETRY_INTERVAL_MS:
                 self._telemetry()
                 last_tel = now
+                print ("Telemetry sent.")
 
             self.render_display()
             time.sleep(0.1)
