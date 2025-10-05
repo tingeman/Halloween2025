@@ -3,17 +3,18 @@ import time
 
 # DFPlayer Command Constants
 
-DFP_CMD_VOL_UP = 0x04        # increase volume
-DFP_CMD_VOL_DOWN = 0x05      # decrease volume
-DFP_CMD_VOL = 0x06           # set volume (one argument)
-DFP_CMD_RESET = 0x0C         # reset the module
-DFP_CMD_RESUME = 0x0D        # resume playback
-DFP_CMD_PAUSE = 0x0E         # pause playback
+DFP_CMD_PLAY_FROM_ROOT = 0x03 # play a specific track in root folder (arg1 = 0, arg2 = track number)
+DFP_CMD_VOL_UP = 0x04         # increase volume
+DFP_CMD_VOL_DOWN = 0x05       # decrease volume
+DFP_CMD_VOL = 0x06            # set volume (one argument)
+DFP_CMD_RESET = 0x0C          # reset the module
+DFP_CMD_RESUME = 0x0D         # resume playback
+DFP_CMD_PAUSE = 0x0E          # pause playback
 DFP_CMD_PLAY = 0x0F          # play a specific track in a specific folder (two arguments)
-DFP_CMD_STOP = 0x16          # stop playback
-DFP_CMD_IS_PLAYING = 0x42    # check if something is playing
-DFP_CMD_GET_VOL = 0x43       # get current volume
-DFP_CMD_GET_FILES = 0x4E     # get number of files in folder
+DFP_CMD_STOP = 0x16           # stop playback
+DFP_CMD_IS_PLAYING = 0x42     # check if something is playing
+DFP_CMD_GET_VOL = 0x43        # get current volume
+DFP_CMD_GET_FILES = 0x4E      # get number of files in folder
 
 class DFPlayer:
     def __init__(self,uart_id,tx_pin_id=None,rx_pin_id=None):
@@ -66,6 +67,11 @@ class DFPlayer:
 
     def stop(self):
         self.send_cmd(DFP_CMD_STOP,0,0)
+
+    def play_from_root(self, file):
+        self.stop()
+        time.sleep(0.05)
+        self.send_cmd(DFP_CMD_PLAY_FROM_ROOT,0,file)
 
     def play(self,folder,file):
         self.stop()

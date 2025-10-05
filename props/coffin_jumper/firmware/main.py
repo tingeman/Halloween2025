@@ -44,7 +44,7 @@ except Exception:
 FW_VERSION = "1.0.0"
 TELEMETRY_INTERVAL_MS = 5000
 MAX_RECONNECT_INTERVAL = 5 * 60 * 1000  # 5 minutes max backoff (given in ms)
-ACTION_FOLDER = 1
+ACTION_FOLDER = 0
 ACTION_TRACK = 1
 
 # OLED dimensions (set to 32 if your display is 128x32)
@@ -57,7 +57,7 @@ PIN_PIR        = 4       # PIR output (3.3V logic!)
 PIR_LOCKOUT_MS = 5000    # Minimum ms between triggers
 PIR_DEBOUNCE_MS= 300     # Debounce time for PIR edges (minimum time between edges)
 PIR_WARMUP_MS  = 5000    # Ignore PIR edges for this long after boot
-PIN_SOLENOID   = 18      # MOSFET gate                (Not updated)
+PIN_SOLENOID   = 2       # MOSFET gate         (Connect to GPIO2)
 UART_NUM       = 2       # DFPlayer UART
 UART_TX        = 17      # ESP32 TX -> DF RX   (Updated per board)
 UART_RX        = 16      # ESP32 RX <- DF TX   (Updated per board)
@@ -188,6 +188,7 @@ class CoffinProp:
         self.mqtt = None
         self.oled = None
         self.pir_latch = None
+        self.solenoid_pin = None
         self.dfp = None
 
     # ----------------------------
@@ -264,6 +265,14 @@ class CoffinProp:
         except Exception as e:
             print("DFPlayer: Failed to initialize:", e)
 
+        # Solenoid Pin (as output to drive MOSFET gate)
+        try:
+            self.solenoid_pin = machine.Pin(PIN_SOLENOID, machine.Pin.OUT)
+            self.solenoid_pin.value(0)  # Ensure it's off initially
+            print("Solenoid Pin: Initialized and set to LOW")
+        except Exception as e:
+            print("Solenoid Pin: Failed to initialize:", e)
+
     def _init_mqtt(self):
         """Create and connect the MQTT client."""
         if not self.wlan or not self.wlan.isconnected() or not secrets:
@@ -315,6 +324,7 @@ class CoffinProp:
         """Perform the pre-programmed action."""
         print("ACTION: Starting...")
         self.play_track(folder=ACTION_FOLDER, track=ACTION_TRACK)
+        self.solenoid_pin.value(1)  # Activate solenoid
         self.set_state("action")
         print("ACTION started and state set to 'action'.")
 
@@ -373,12 +383,20 @@ class CoffinProp:
             "uptime_s": time.ticks_ms() // 1000,
             "triggers": self.triggers,
             "pir": "---",
+            "relay": "---",
+            "relay_pin_state": "---",
             "blocked": self.is_blocked,
             "vol": self.volume,
             "rssi": None,
         }
         if self.pir_latch:
             tel["pir"] = "Motion!" if self.pir_latch.active() else "---"
+
+        if self.relay:
+            # relay is really a MOSFET, driven by SOLENOID pin
+            tel["solenoid_pin_state"] = "High" if self.solenoid_pin.value() else "Low"
+            tel["solenoid_power"] = "On" if self.solenoid_pin.value() else "Off"
+
         if self.wlan and hasattr(self.wlan, "status"):
             tel["rssi"] = self.wlan.status('rssi')
         
@@ -466,6 +484,15 @@ class CoffinProp:
                 self.set_volume(vol)
             track = params.get("track", 1)
             self.play_track(folder=0, track=track)
+        elif action == "set_volume":
+            vol = params.get("volume")
+            if vol is not None:
+                current_vol = self.dfp.get_volume()
+                print("Current volume:", current_vol, "-> New volume:", vol)
+                self.set_volume(vol)
+                self.sleep(1)  # Give some time for the volume change to take effect
+                new_vol = self.dfp.get_volume()
+                print("Volume now set to:", new_vol)
         elif action == "pause_music":
             self.pause()
         elif action == "resume_music":
@@ -493,7 +520,13 @@ class CoffinProp:
         if not self.dfp: return
         try:
             if track >= 1:
-                self.dfp.play(folder, track)
+                if folder == 0:
+                    print("Playing track {} from root".format(track))
+                    self.dfp.play_from_root(track)
+                else:
+                    print("Playing track {} from folder {}".format(track, folder))
+                    self.dfp.play(folder, track)
+                #self.dfp.send_cmd(3, folder, track)
                 self.set_state("playing")
             else:
                 print("Track number must be >= 1:", track)
@@ -534,6 +567,23 @@ class CoffinProp:
         # Exponential backoff: 2s, 4s, 8s, 16s, ..., up to 5 mins
         delay = min(MAX_RECONNECT_INTERVAL, (2 ** attempts) * 1000)
         return delay
+
+    # ----------------------------
+    # Other Helpers
+    # ----------------------------
+
+    def sleep(self, duration: float, verbose: bool = False):
+        """Sleep for a given duration in seconds.
+        If verbose is true, print a countdown message every 1 second.
+        """
+        if verbose:
+            for remaining in range(int(duration), 0, -1):
+                print(f"Sleeping... {remaining} seconds remaining")
+                time.sleep(1)
+            if duration % 1:
+                time.sleep(duration % 1) # Sleep the fractional part
+        else:
+            time.sleep(duration)
 
     # ----------------------------
     # Main Loop
@@ -629,6 +679,7 @@ class CoffinProp:
                 if not self.is_blocked and self.state in ("armed", "idle"):
                     self.triggers += 1
                     self._start_action()
+                    self.sleep(5, verbose=True)   # Simple debounce after action start
                 else:
                     print("PIR triggered but blocked")
 
