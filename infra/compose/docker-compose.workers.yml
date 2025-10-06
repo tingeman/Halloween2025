@@ -1,0 +1,20 @@
+  worker_host:
+    build:
+      context: .
+      dockerfile: server/worker_host/Dockerfile
+    image: halloween/worker_host:latest
+    container_name: halloween_worker_host
+    restart: unless-stopped
+    depends_on:
+      - broker
+    environment:
+      MQTT_HOST: broker
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: "${WORKER_USERNAME:-worker}"
+      MQTT_PASSWORD: "${WORKER_PASSWORD:?set in config/secrets/mqtt_users.env}"
+      MQTT_CLIENT_ID: "worker_host_${HOSTNAME:-dev}"
+    volumes:
+      - ./:/app:ro
+    labels:
+      # optional: help you find it in docker ps filters
+      com.halloween.role: "worker_host"
