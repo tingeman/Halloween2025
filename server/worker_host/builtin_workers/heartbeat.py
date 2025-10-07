@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json
 from worker_host.base import BaseWorker
 
-PROP_ID = "builtin_heartbeat"
+PROP_ID = "worker_host_heartbeat"
 
 class Worker(BaseWorker):
     """

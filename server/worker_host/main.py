@@ -12,7 +12,7 @@ from .loader import discover_workers, WorkerDesc
 from .mqtt import ThreadedMqtt
 
 PROPS_ROOT = Path("/app/props")  # bind-mounted repo
-BUILTIN_ROOT = Path("/app/server/worker_host/builtin_workers")  # optional
+BUILTIN_ROOT = Path("/app/worker_host/builtin_workers")  # optional
 WORKER_LWT = "halloween/worker_host/availability"
 UPTIME_TOPIC = "halloween/worker_host/uptime"
 
@@ -40,9 +40,9 @@ async def run():
     # MQTT
     host = env("MQTT_HOST", "broker")
     port = int(env("MQTT_PORT", "1883"))
-    user = env("MQTT_USERNAME", "")
-    pw   = env("MQTT_PASSWORD", "")
-    client_id = env("MQTT_CLIENT_ID", "halloween_worker_host")
+    user = env("MQTT_WORKER_USER", "worker")
+    pw   = env("MQTT_WORKER_PW", "")
+    client_id = env("MQTT_CLIENT_ID", "worker_host")
 
     mqtt = ThreadedMqtt(
         host=host,
@@ -57,7 +57,12 @@ async def run():
     # Discover workers (class-only contract)
     discovered = discover_workers(PROPS_ROOT, BUILTIN_ROOT if BUILTIN_ROOT.exists() else None)
     if not discovered:
-        mqtt.publish("halloween/worker_host/status/warn", "No workers discovered", qos=0)
+        mqtt.publish(f"halloween/{client_id}/status/warn", "No workers discovered", qos=0)
+
+    # Helpful debug: list discovered workers (prop_id -> origin)
+    print("[worker_host] Discovered workers:")
+    for d in discovered:
+        print(f"  - prop_id={d.prop_id} origin={d.origin}")
 
     # Fan-out setup
     loop = asyncio.get_running_loop()
@@ -117,4 +122,5 @@ def main():
     asyncio.run(run())
 
 if __name__ == "__main__":
+    print("[worker_host] Starting up...")
     main()

@@ -67,10 +67,13 @@ def _try_load_one(mod_name: str, worker_py: Path, prop_id_hint: Optional[str] = 
         cfg_yml  = worker_py.with_name("config.yml")
         config_path = cfg_json if cfg_json.exists() else (cfg_yaml if cfg_yaml.exists() else (cfg_yml if cfg_yml.exists() else None))
 
-        if worker_py.parent.name == "backend" and worker_py.parent.parent.parent.name == "props":
-            prop_id = worker_py.parent.parent.name
-        else:
-            prop_id = prop_id_hint or getattr(m, "PROP_ID", None) or _maybe_prop_id_from_builtin(worker_py)
+        # if worker_py.parent.name == "backend" and worker_py.parent.parent.parent.name == "props":
+        #     prop_id = worker_py.parent.parent.name
+        # else:
+        
+        # Prefer an explicit PROP_ID defined in the module. If not present, fall back
+        # to the provided hint (used for builtins) and finally to the filename.
+        prop_id = getattr(m, "PROP_ID", None) or prop_id_hint or worker_py.stem
 
         return WorkerDesc(prop_id=prop_id, cls=cls, origin=worker_py, config_path=config_path)
 

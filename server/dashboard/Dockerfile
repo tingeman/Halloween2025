@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY server/dashboard/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy only the runtime modules we need (no build/install step)
+# Keep layout similar to dashboard: copy module files into /app
 COPY server/dashboard/app.py ./app.py
 COPY server/dashboard/mqtt_service.py ./mqtt_service.py
 COPY server/dashboard/plugin_loader.py ./plugin_loader.py

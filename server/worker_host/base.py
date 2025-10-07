@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio, json
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, Iterable
 
 @dataclass
 class MqttMessage:
@@ -62,6 +62,7 @@ class BaseWorker:
 
     def telemetry(self, key: str, value: Any, qos: int = 0) -> None:
         self.mqtt.publish(f"halloween/{self.prop_id}/telemetry/{key}", str(value), qos=qos)
+        print(f"telemetry: halloween/{self.prop_id}/telemetry/{key}={value}")
 
     def status(self, key: str, value: Any, qos: int = 0, retain: bool = False) -> None:
         self.mqtt.publish(f"halloween/{self.prop_id}/status/{key}", str(value), qos=qos, retain=retain)

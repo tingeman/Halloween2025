@@ -1,20 +1,20 @@
+ services: 
   worker_host:
     build:
-      context: .
+      context: ../..
       dockerfile: server/worker_host/Dockerfile
     image: halloween/worker_host:latest
     container_name: halloween_worker_host
     restart: unless-stopped
     depends_on:
-      - broker
+      - mqtt
+    env_file:
+      - ../../config/secrets/mqtt_users.env
+      - ../../config/worker_host.env
     environment:
-      MQTT_HOST: broker
-      MQTT_PORT: "1883"
-      MQTT_USERNAME: "${WORKER_USERNAME:-worker}"
-      MQTT_PASSWORD: "${WORKER_PASSWORD:?set in config/secrets/mqtt_users.env}"
-      MQTT_CLIENT_ID: "worker_host_${HOSTNAME:-dev}"
+      - PYTHONPATH=/app:/opt/libs/py:/opt/builtin_workers
     volumes:
-      - ./:/app:ro
+      - ../../props:/app/props:ro
+      - ../../libs/py:/opt/libs/py:ro
     labels:
-      # optional: help you find it in docker ps filters
-      com.halloween.role: "worker_host"
+      com.halloween.role: "worker_host"      
