@@ -1,0 +1,7 @@
+PyYAML
+ipdb
+numpy
+paho-mqtt
+phue2
+pychromecast
+pydantic

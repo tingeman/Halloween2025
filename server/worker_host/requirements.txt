@@ -1,1 +1,4 @@
-paho-mqtt>=1.6
+paho-mqtt
+PyYAML
+pydantic
+pydantic-settings

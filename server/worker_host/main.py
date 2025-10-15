@@ -22,19 +22,39 @@ def env(name: str, default: str | None = None, required: bool = False) -> str:
         raise SystemExit(f"Missing required env var: {name}")
     return val or ""
 
-def _load_config(desc: WorkerDesc) -> dict:
+def _load_config(desc: WorkerDesc) -> dict | None:
     if not desc.config_path:
-        return {}
+        return None
     try:
-        if desc.config_path.suffix.lower() == ".json":
-            return json.loads(desc.config_path.read_text(encoding="utf-8"))
-        # Lazy YAML support only if user adds pyyaml to deps
+        raw_config_text = desc.config_path.read_text(encoding="utf-8")
+        
+        # Use basic dict loading if no model is provided
+        if not desc.config_model:
+            if desc.config_path.suffix.lower() == ".json":
+                return json.loads(raw_config_text)
+            elif desc.config_path.suffix.lower() in (".yaml", ".yml"):
+                import yaml
+                return yaml.safe_load(raw_config_text) or {}
+            else:
+                print(f"[worker_host] Unknown config format for {desc.config_path}")
+                return {}
+
+        # If a Pydantic model is defined, use it to parse
         if desc.config_path.suffix.lower() in (".yaml", ".yml"):
-            import yaml  # type: ignore
-            return yaml.safe_load(desc.config_path.read_text(encoding="utf-8")) or {}
+            import yaml
+            raw_dict = yaml.safe_load(raw_config_text) or {}
+            # Let the worker's ConfigModel (now a BaseSettings subclass)
+            # resolve missing values from the environment. Validate directly.
+            return desc.config_model.model_validate(raw_dict)
+        elif desc.config_path.suffix.lower() == ".json":
+            return desc.config_model.model_validate_json(raw_config_text)
+        else:
+            print(f"[worker_host] Pydantic model provided, but config format for {desc.config_path} is not json or yaml.")
+            return None
+
     except Exception as e:
-        print(f"[worker_host] Failed to parse {desc.config_path}: {e}")
-    return {}
+        print(f"[worker_host] Failed to parse {desc.config_path} with model {desc.config_model}: {e}")
+        return None
 
 async def run():
     # MQTT

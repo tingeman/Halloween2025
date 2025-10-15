@@ -1,7 +1,8 @@
 from __future__ import annotations
-import asyncio, json
+import asyncio, json, os, re
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol, Iterable
+from typing import Any, Callable, Optional, Protocol, Iterable, Union
+from pydantic import BaseModel
 
 @dataclass
 class MqttMessage:
@@ -23,7 +24,7 @@ class BaseWorker:
     Status:        halloween/<prop_id>/status/<key>
     Availability:  halloween/<prop_id>/status/availability
     """
-    def __init__(self, prop_id: str, mqtt: MqttClientProto, config: dict[str, Any] | None = None):
+    def __init__(self, prop_id: str, mqtt: MqttClientProto, config: Union[dict[str, Any], BaseModel, None] = None):
         self.prop_id = prop_id
         self.mqtt = mqtt
         self.config = config or {}
@@ -53,12 +54,53 @@ class BaseWorker:
                 await asyncio.coroutine(getattr(self, handler_name))(arg)
             except Exception as e:
                 self.status("error", f"{type(e).__name__}: {e}")
+        elif hasattr(self, "do_command"):
+            try:
+                await asyncio.coroutine(self.do_command)(action, arg)
+            except Exception as e:
+                self.status("error", f"{type(e).__name__}: {e}")
         else:
             self.status("warn", f"Unknown action: {action}")
 
     # --- Helpers for workers ---
     def spawn(self, coro) -> None:
         self._tasks.append(asyncio.create_task(coro))
+
+    def resolve_config_var(self, key: str, default: Any = None) -> Any:
+        """
+        Resolves a configuration value from the worker's config dictionary.
+
+        This method provides a hierarchical lookup:
+        1. It retrieves the value for the given key from `self.config`.
+        2. If the value is a string in the format `${ENV_VAR_NAME}`, it
+           attempts to resolve it from the environment variables.
+        3. If the key is not found in the config, or if the corresponding
+           environment variable is not set, it returns the provided `default`.
+
+        Args:
+            key: The configuration key to look up.
+            default: The value to return if the key or environment variable
+                     is not found.
+
+        Returns:
+            The resolved configuration value.
+        """
+        value = self.config.get(key)
+
+        if value is None:
+            return default
+
+        if isinstance(value, str):
+            # Check for ${VAR_NAME} pattern
+            match = re.match(r'^\$\{(.+)\}$', value)
+            if match:
+                env_var_name = match.group(1)
+                env_value = os.getenv(env_var_name)
+                # Return the environment value if it exists, otherwise the default
+                return env_value if env_value is not None else default
+        
+        # If it's not a placeholder string, return the value directly
+        return value
 
     def telemetry(self, key: str, value: Any, qos: int = 0) -> None:
         self.mqtt.publish(f"halloween/{self.prop_id}/telemetry/{key}", str(value), qos=qos)

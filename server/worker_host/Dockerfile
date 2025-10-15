@@ -7,9 +7,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install runtime requirements (dashboard-style)
-COPY server/worker_host/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# upgrade pip then install
+RUN python -m pip install --upgrade pip 
 
 # Copy package source into the image so the package can be executed as a module
 # placing it at /app/worker_host makes `python -m worker_host.main` work when
@@ -17,6 +16,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server/worker_host /app/worker_host
 # Built-in workers shipped with the image
 COPY server/worker_host/builtin_workers /opt/builtin_workers
+
+# copy props into the image so the collector can read per-prop requirements
+COPY props /app/props
+
+# Ensure the script knows where the repo root is
+ENV REPO_ROOT=/app
+
+# run collector and install combined requirements
+RUN python /app/worker_host/collect_requirements.py /tmp/combined-requirements.txt \
+    && pip install --no-cache-dir -r /tmp/combined-requirements.txt
+
+# # Install runtime requirements (dashboard-style)
+# COPY server/worker_host/requirements.txt ./requirements.txt
+# RUN pip install --no-cache-dir -r requirements.txt
+
 
 # We bind-mount repository props at runtime; ensure PYTHONPATH includes:
 # - /app (parent of /app/worker_host)
