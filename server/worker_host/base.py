@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio, json, os, re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, Iterable, Union
+import inspect
 from pydantic import BaseModel
 
 @dataclass
@@ -22,7 +23,8 @@ class BaseWorker:
     Control topic: halloween/<prop_id>/cmd   (action comes from payload)
     Telemetry:     halloween/<prop_id>/telemetry/<key>
     Status:        halloween/<prop_id>/status/<key>
-    Availability:  halloween/<prop_id>/status/availability
+    State:         halloween/<prop_id>/state
+    Availability:  halloween/<prop_id>/availability
     """
     def __init__(self, prop_id: str, mqtt: MqttClientProto, config: Union[dict[str, Any], BaseModel, None] = None):
         self.prop_id = prop_id
@@ -33,12 +35,18 @@ class BaseWorker:
     # --- Lifecycle ---
     async def start(self) -> None:
         self.mqtt.subscribe(f"halloween/{self.prop_id}/cmd", qos=1)
-        self.mqtt.publish(f"halloween/{self.prop_id}/status/availability", "online", qos=1, retain=True)
+        # Publish a simple availability LWT topic (no 'status' segment) so the
+        # dashboard and other consumers can subscribe to `halloween/<prop_id>/availability`.
+        self.mqtt.publish(f"halloween/{self.prop_id}/availability", "online", qos=1, retain=True)
+        # announce state
+        self.publish_state("started", qos=1, retain=True)
 
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
-        self.mqtt.publish(f"halloween/{self.prop_id}/status/availability", "offline", qos=1, retain=True)
+        self.mqtt.publish(f"halloween/{self.prop_id}/availability", "offline", qos=1, retain=True)
+        # announce state
+        self.publish_state("stopped", qos=1, retain=True)
 
     # --- Message dispatch (parse action from payload) ---
     async def on_message(self, msg: MqttMessage) -> None:
@@ -50,13 +58,22 @@ class BaseWorker:
             return
         handler_name = f"do_{action.replace('/', '_')}"
         if hasattr(self, handler_name):
+            handler = getattr(self, handler_name)
             try:
-                await asyncio.coroutine(getattr(self, handler_name))(arg)
+                # If handler is async, await it; if it's sync, run in thread to avoid blocking loop
+                if inspect.iscoroutinefunction(handler):
+                    await handler(arg)
+                else:
+                    await asyncio.to_thread(handler, arg)
             except Exception as e:
                 self.status("error", f"{type(e).__name__}: {e}")
         elif hasattr(self, "do_command"):
+            handler = getattr(self, "do_command")
             try:
-                await asyncio.coroutine(self.do_command)(action, arg)
+                if inspect.iscoroutinefunction(handler):
+                    await handler(action, arg)
+                else:
+                    await asyncio.to_thread(handler, action, arg)
             except Exception as e:
                 self.status("error", f"{type(e).__name__}: {e}")
         else:
@@ -85,7 +102,30 @@ class BaseWorker:
         Returns:
             The resolved configuration value.
         """
-        value = self.config.get(key)
+        # Support `self.config` being either a dict or a pydantic BaseModel
+        value = None
+        try:
+            if isinstance(self.config, dict):
+                value = self.config.get(key)
+            elif isinstance(self.config, BaseModel):
+                # Prefer attribute access (fast) to avoid serializing the whole
+                # pydantic model on every lookup. Fall back to model_dump() if
+                # the attribute is not present (or the model uses aliases).
+                value = getattr(self.config, key, None)
+                if value is None and hasattr(self.config, 'model_dump'):
+                    try:
+                        dd = self.config.model_dump()
+                        value = dd.get(key, None)
+                    except Exception:
+                        value = None
+            else:
+                # Generic mapping-like attempt
+                try:
+                    value = self.config.get(key)  # type: ignore[attr-defined]
+                except Exception:
+                    value = getattr(self.config, key, None)
+        except Exception:
+            value = None
 
         if value is None:
             return default
@@ -106,8 +146,23 @@ class BaseWorker:
         self.mqtt.publish(f"halloween/{self.prop_id}/telemetry/{key}", str(value), qos=qos)
         print(f"telemetry: halloween/{self.prop_id}/telemetry/{key}={value}")
 
-    def status(self, key: str, value: Any, qos: int = 0, retain: bool = False) -> None:
+    def publish_status(self, key: str, value: Any, qos: int = 0, retain: bool = False) -> None:
         self.mqtt.publish(f"halloween/{self.prop_id}/status/{key}", str(value), qos=qos, retain=retain)
+
+    def publish_state(self, state: str, qos: int = 0, retain: bool = False) -> None:
+        """Publish a simple textual state for the worker under
+        `halloween/<prop_id>/state`.
+
+        Args:
+            state: short textual state (e.g. 'started', 'stopped', 'playing')
+            qos: MQTT QoS
+            retain: whether to retain the state message
+        """
+        try:
+            self.mqtt.publish(f"halloween/{self.prop_id}/state", str(state), qos=qos, retain=retain)
+        except Exception:
+            # Ensure worker doesn't crash due to publish errors
+            print(f"[worker_host] failed to publish state for {self.prop_id}: {state}")
 
     def command(self, target_prop: str, action: str, args: Any | None = None, *, qos: int = 1):
         """
