@@ -19,14 +19,3 @@
       - ../../libs/py:/opt/libs/py:ro
     labels:
       com.halloween.role: "worker_host"      
-
-  media_server:
-    image: nginx:1.25-alpine
-    container_name: halloween_media_server
-    restart: unless-stopped
-    volumes:
-      # Mount the top-level media folder into the Nginx web root
-      - ../../media:/usr/share/nginx/html:ro
-    ports:
-      # Expose port 8000 on the host, mapping to port 80 in the container
-      - "8000:80"
