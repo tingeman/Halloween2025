@@ -1,12 +1,42 @@
 
+"""Chromecast group helper utilities.
+
+This module provides a simple wrapper around ``pychromecast`` for managing
+groups of Chromecast devices. It offers both synchronous and non-blocking
+background media loading APIs. Key guarantees:
+
+- ``ChromecastGroup.load_media_bg`` returns a ``MediaLoadTask`` which will
+    ensure a loaded track is PAUSED when the device reports "ready" unless
+    ``autoplay=True`` is specified. This prevents races where a subsequent
+    ``play()`` call is issued before the device has reached a stable PLAYING
+    state.
+- The background task supports cancel, join and asyncio Future bridging via
+    ``cancel()``, ``join()`` and ``as_future()``.
+
+Usage examples::
+
+        group = ChromecastGroup(['10.0.0.10'])
+        # Non-blocking load that leaves the device paused when ready
+        task = group.load_media_bg(['http://host/track.mp3'], autoplay=False)
+        # Wait in asyncio code:
+        results = await task.as_future()
+        # Or poll/join from synchronous code:
+        results = task.join()
+
+The module preserves the original synchronous ``load_media`` behaviour
+for compatibility.
+"""
+
 import numpy as np
 import time
 import asyncio
 import colorsys
 import pychromecast
 from pychromecast.const import MESSAGE_TYPE
-from pychromecast.response_handler import WaitResponse
+from pychromecast import WaitResponse
 import threading
+from dataclasses import dataclass
+from typing import Optional, List, Callable, Any
 import random
 
 import ipdb
@@ -70,6 +100,16 @@ def queue_repeat(castunit, repeatMode: str, timeout: float = 10.0) -> None:
 
 
 class ChromecastGroup:
+    """Manage a group of Chromecast devices discovered by IP address.
+
+    This class wraps common operations (load, play, pause, stop, volume).
+
+    Important behavior:
+    - Use ``load_media`` for synchronous/blocking loads (legacy behavior).
+    - Use ``load_media_bg`` to begin a non-blocking load that ensures the
+      device is PAUSED when ready unless ``autoplay=True`` is specified.
+    - The class relies on ``pychromecast`` for device discovery and control.
+    """
     TIMEOUT = 10  # seconds
 
     def __init__(self, host_list, volumes=None):
@@ -102,7 +142,100 @@ class ChromecastGroup:
     def is_empty(self):
         return len(self.chromecasts) == 0
 
+    def _load_media_for_cast(self, cast, url: str, enqueue: bool, autoplay: bool, cancel_event: Optional[threading.Event] = None):
+        """Internal helper to load media onto a single cast.
+
+        This method blocks until the cast reports a stable state (PAUSED/PLAYING) or until
+        TIMEOUT expires. If cancel_event is provided and set, the operation will abort early.
+        """
+        initial_player_state = cast.media_controller.status.player_state
+
+        print("Loading media: " + cast.cast_info.host)
+        cast.media_controller.play_media(url, "audio/mp3", autoplay=autoplay, enqueue=enqueue)
+
+        if (not autoplay) and (initial_player_state != 'PLAYING'):
+            print("Waiting for paused status: " + cast.cast_info.host)
+        else:
+            print("Waiting for playing status: " + cast.cast_info.host)
+
+        current_time = time.monotonic()
+        while cast.media_controller.status.player_state in ['UNKNOWN', 'IDLE', 'BUFFERING']:
+            if cancel_event is not None and cancel_event.is_set():
+                print(f'Cancelled load for {cast.cast_info.host} during buffering wait')
+                return 'cancelled'
+            cast.media_controller.update_status()
+            print(cast.media_controller.status.player_state)
+            if time.monotonic() - current_time > self.TIMEOUT:
+                break
+            time.sleep(0.2)
+
+        # Ensure we have an up-to-date status
+        cast.media_controller.update_status()
+
+        # If autoplay is False, ensure the device is paused when ready.
+        if not autoplay and (initial_player_state != 'PLAYING'):
+            # If device says PAUSED we're good; otherwise try to pause and verify.
+            if cast.media_controller.status.player_state == 'PAUSED':
+                print("Paused status reported: " + cast.cast_info.host)
+                return 'paused'
+            # Try to pause explicitly (some devices start playing briefly)
+            print(f'Enforcing pause on {cast.cast_info.host}')
+            try:
+                cast.media_controller.pause()
+            except Exception as e:
+                print(f'Pause failed for {cast.cast_info.host}: {e}')
+
+            verify_deadline = time.monotonic() + self.TIMEOUT
+            while time.monotonic() < verify_deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    print(f'Cancelled load for {cast.cast_info.host} during pause verification')
+                    return 'cancelled'
+                cast.media_controller.update_status()
+                if cast.media_controller.status.player_state == 'PAUSED':
+                    print("Paused status verified: " + cast.cast_info.host)
+                    return 'paused'
+                time.sleep(0.2)
+
+            # If we reach here, pause verification failed
+            print(f'Failed to verify PAUSED for {cast.cast_info.host}; state={cast.media_controller.status.player_state}')
+            return 'unexpected'
+        else:
+            # autoplay True path: if device reported PAUSED but autoplay requested, issue play
+            if cast.media_controller.status.player_state == 'PLAYING':
+                print("Playing status reported: " + cast.cast_info.host)
+                return 'playing'
+            elif cast.media_controller.status.player_state == 'PAUSED':
+                print("Paused status reported: " + cast.cast_info.host)
+                if autoplay:
+                    print("Sending play request: " + cast.cast_info.host)
+                    try:
+                        cast.media_controller.play()
+                    except Exception as e:
+                        print(f'Play failed for {cast.cast_info.host}: {e}')
+                return cast.media_controller.status.player_state
+
+        print(" ")
+        print("Debug info:")
+        print(f"Host: {cast.cast_info.host}")
+        print(f"Host status: {cast.media_controller.status}")
+        print(f"Host initial player state: {initial_player_state}")
+        print(f"Host player state: {cast.media_controller.status.player_state}")
+        print(f"Audoplay requested: {autoplay}")
+        raise ValueError('Unexpected player state')
+
     def load_media(self, url_list, enqueue=False, autoplay=False):
+        """Synchronous load_media kept for compatibility.
+
+        Parameters
+        - url_list: list of URLs. If fewer URLs than devices are provided, the
+          last URL is reused for remaining devices.
+        - enqueue: whether to enqueue on the device's queue (bool).
+        - autoplay: whether the cast should start playing immediately (bool).
+
+        This function blocks until each device reports a stable state or the
+        per-group TIMEOUT expires. Prefer ``load_media_bg`` in async or
+        latency-sensitive contexts.
+        """
         print('my_chromecast::load_media:  Number of chromecasts: {0}'.format(len(self.chromecasts)))
         for cid, cast in enumerate(self.chromecasts):
             print('my_chromecast::load_media:  {0}: {1}'.format(cid, self.chromecasts[cid].cast_info.host))
@@ -111,49 +244,124 @@ class ChromecastGroup:
                 url = url_list[-1]  # take last item, if there is not enough
             else:
                 url = url_list[cid]
-            
-            initial_player_state = cast.media_controller.status.player_state
-            
-            print("Loading media: "+cast.cast_info.host)
-            cast.media_controller.play_media(url, "audio/mp3", autoplay=autoplay, enqueue=enqueue)
-            
-            if (not autoplay) and (initial_player_state != 'PLAYING'):
-                print("Waiting for paused status: "+cast.cast_info.host)
-            else:
-                print("Waiting for playing status: "+cast.cast_info.host)
-            
-            current_time = time.monotonic()
-            while cast.media_controller.status.player_state in ['UNKNOWN', 'IDLE', 'BUFFERING']:
-                print(cast.media_controller.status.player_state)
-                cast.media_controller.update_status()
-                if time.monotonic() - current_time > self.TIMEOUT:
-                    break
-                time.sleep(0.5)
 
-            cast.media_controller.update_status()
-            if not autoplay  and (initial_player_state != 'PLAYING'):
-                if cast.media_controller.status.player_state == 'PAUSED':
-                    print("Paused status reported: "+cast.cast_info.host)
-                    continue
-            else: 
-                if cast.media_controller.status.player_state == 'PLAYING':
-                    print("Playing status reported: "+cast.cast_info.host)
-                    continue
-                elif cast.media_controller.status.player_state == 'PAUSED':
-                    print("Paused status reported: "+cast.cast_info.host)
-                    if autoplay:
-                        print("Sending play request: "+cast.cast_info.host)
-                        cast.media_controller.play()
-                    continue
-            
-            print(" ")
-            print("Debug info:")    
-            print(f"Host: {cast.cast_info.host}")
-            print(f"Host status: {cast.media_controller.status}")
-            print(f"Host initial player state: {initial_player_state}")
-            print(f"Host player state: {cast.media_controller.status.player_state}")
-            print(f"Audoplay requested: {autoplay}")
-            raise ValueError('Unexpected player state')
+            self._load_media_for_cast(cast, url, enqueue=enqueue, autoplay=autoplay)
+
+    @dataclass
+    class MediaLoadTask:
+        """Background media loader control object.
+
+        Fields
+        - group: owning ChromecastGroup
+        - url_list: list of URLs to load (one per device ideally)
+        - enqueue: whether to enqueue on the cast queue
+        - autoplay: whether to start playback immediately
+
+        Methods
+        - start(): begin the background load in a daemon thread
+        - cancel(): request task cancellation
+        - join(timeout=None): wait for completion and return per-device results
+        - as_future(loop=None): return an asyncio.Future that resolves with
+          the per-device results when loading finishes
+        """
+        group: 'ChromecastGroup'
+        url_list: List[str]
+        enqueue: bool
+        autoplay: bool
+        thread: Optional[threading.Thread] = None
+        cancel_event: Optional[threading.Event] = None
+        _done_event: Optional[threading.Event] = None
+        _exception: Optional[BaseException] = None
+        _results: Optional[List[Any]] = None
+
+        def start(self):
+            """Start the background load runner.
+
+            The runner iterates the group's devices, loads media for each, and
+            records the outcome. The thread is created as a daemon so it won't
+            block process exit.
+            """
+            if self.cancel_event is None:
+                self.cancel_event = threading.Event()
+            if self._done_event is None:
+                self._done_event = threading.Event()
+            self._results = []
+
+            def _runner():
+                try:
+                    for cid, cast in enumerate(self.group.chromecasts):
+                        if self.cancel_event.is_set():
+                            print('MediaLoadTask cancelled before loading next cast')
+                            break
+
+                        if cid >= len(self.url_list):
+                            url = self.url_list[-1]
+                        else:
+                            url = self.url_list[cid]
+
+                        res = self.group._load_media_for_cast(cast, url, enqueue=self.enqueue, autoplay=self.autoplay, cancel_event=self.cancel_event)
+                        self._results.append((cast.cast_info.host, res))
+                except Exception as e:
+                    self._exception = e
+                finally:
+                    self._done_event.set()
+
+            self.thread = threading.Thread(target=_runner, daemon=True)
+            self.thread.start()
+
+        def cancel(self):
+            """Request cancellation of the running background task.
+
+            The worker checks the cancel event between devices and while polling
+            a device's status; setting this event will cause the runner to
+            abort early where possible.
+            """
+            if self.cancel_event is not None:
+                self.cancel_event.set()
+
+        def join(self, timeout: Optional[float] = None):
+            """Block until the background task finishes or until timeout.
+
+            Returns the per-device results or raises any exception captured
+            during the runner. If the task is not yet done, returns None.
+            """
+            if self.thread is not None:
+                self.thread.join(timeout)
+            if self._done_event is not None and self._done_event.is_set():
+                if self._exception:
+                    raise self._exception
+                return self._results
+            return None
+
+        def as_future(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> asyncio.Future:
+            """Return an asyncio.Future that completes when the task finishes.
+
+            If called from an asyncio context, pass loop=None to use the running loop.
+            """
+            if loop is None:
+                loop = asyncio.get_event_loop()
+            fut = loop.create_future()
+
+            def _wait_and_set():
+                self._done_event.wait()
+                if self._exception:
+                    loop.call_soon_threadsafe(fut.set_exception, self._exception)
+                else:
+                    loop.call_soon_threadsafe(fut.set_result, self._results)
+
+            waiter = threading.Thread(target=_wait_and_set, daemon=True)
+            waiter.start()
+            return fut
+
+    def load_media_bg(self, url_list, enqueue=False, autoplay=False) -> 'ChromecastGroup.MediaLoadTask':
+        """Start loading media in background threads. Returns a MediaLoadTask with control methods.
+
+        The background loader will ensure that when a cast reports 'ready' the track is PAUSED
+        unless autoplay=True (in which case it will allow/ensure PLAYING).
+        """
+        task = ChromecastGroup.MediaLoadTask(group=self, url_list=url_list, enqueue=enqueue, autoplay=autoplay)
+        task.start()
+        return task
 
     def stop(self):
         for cast in self.chromecasts: 

@@ -245,6 +245,7 @@ class CooldownState(State):
 
     def on_action(self, context, action, arg):
         """Allows the prop to be stopped manually during cooldown."""
+        print(f"{self.__class__.__name__}::action passed: {action}, arg: {arg}")
         # Allow stopping during cooldown
         if action == 'stop':
             context.set_state(StoppedState)
@@ -300,17 +301,23 @@ class PlayingState(State):
         finishes playing, it transitions to the FadeOutState.
         """
         current_time = time.monotonic()
-        if current_time - self.last_motion_time > self.timeout_interval:
-            # Trigger timeout if enough time has passed since the last motion detection
-            print("Timeout triggered due to inactivity.")
-            context.set_state(FadeOutState)
-        print(f"{self.__class__.__name__}::Time since last motion: {current_time - self.last_motion_time:.1f} s")
-        
-        if not context.cc_tesla_group.is_empty():
-            context.cc_tesla_group.refresh()
-            if not context.cc_tesla_group.any_playing():
-                print("Soundtrack stopped playing...")
+
+        if len(context.motion_sensors) > 0:
+            if current_time - self.last_motion_time > self.timeout_interval:
+                # Trigger timeout if enough time has passed since the last motion detection
+                print("Timeout triggered due to inactivity.")
                 context.set_state(FadeOutState)
+                return 
+        
+            print(f"{self.__class__.__name__}::Time since last motion: {current_time - self.last_motion_time:.1f} s")
+        
+        if time.monotonic() - self.last_motion_time > 5:   # WAIT minimum 5 seconds before checking playing state
+            if not context.cc_tesla_group.is_empty():
+                context.cc_tesla_group.refresh()
+                if not context.cc_tesla_group.any_playing():
+                    print("Soundtrack stopped playing...")
+                    context.set_state(FadeOutState)
+                    return
 
     def on_action(self, context, action, arg):
         """Handles user commands during the playing sequence."""
@@ -442,11 +449,32 @@ class _NullHueManager:
 
 class _DummyChromecastGroup:
     def __init__(self):
-        pass
+        self.chromecasts = []
     def is_empty(self):
         return True
     def load_media(self, *a, **k):
         return None
+    def load_media_bg(self, *a, **k):
+        """Return a dummy background-task compatible object for environments
+        where ChromeCast devices are not available.
+
+        The returned object exposes cancel(), join(timeout=None) and
+        as_future(loop=None) so callers can rely on the same API as the
+        real MediaLoadTask.
+        """
+        class _DummyTask:
+            def cancel(self):
+                return None
+            def join(self, timeout=None):
+                return []
+            def as_future(self, loop=None):
+                if loop is None:
+                    loop = asyncio.get_event_loop()
+                fut = loop.create_future()
+                loop.call_soon_threadsafe(fut.set_result, [])
+                return fut
+
+        return _DummyTask()
     def stop(self):
         return None
     def play(self):
@@ -545,6 +573,12 @@ class Worker(BaseWorker):
         self.play_counter = 0
         self.time_of_last_play = time.monotonic() - 600    # set it to 10 minutes ago
 
+        self.hue_lights = []
+        self.hue_manager = _NullHueManager()  # Default to null manager
+        self.motion_sensors = []
+        self.cc_tesla_group = _DummyChromecastGroup()  # Default to dummy group
+        self.tesla_car = None
+
 
     # --- NEW: State Management Method ---
     def set_state(self, new_state_class):
@@ -586,6 +620,8 @@ class Worker(BaseWorker):
         if action:
             print(f"Queueing command: {action}({arg})")
             self.command_queue.put((action, arg))
+            print(f"Queue size is now {self.command_queue.qsize()}")
+            print(f"Command queue contents: {list(self.command_queue.queue)}")
 
     async def _init_integrations(self):
         """
@@ -620,39 +656,95 @@ class Worker(BaseWorker):
         This method is executed in a separate thread via `asyncio.to_thread`
         to prevent blocking the main worker loop.
         """
-        # Chromecast
+        # Run the three sub-connectors. Each handles its own errors and
+        # leaves a sane fallback (dummy) in place so the worker can continue.
+        self._connect_chromecast()
+        self._connect_hue()
+        self._connect_tesla()
+
+    def _connect_chromecast(self):
+        """Blocking init for Chromecast devices. Safe to call from a thread.
+
+        Sets `self.cc_tesla_group` to a real ChromecastGroup on success or a
+        `_DummyChromecastGroup` on failure.
+        """
         try:
             print('Connecting to sound system...')
-            self.cc_tesla_group = ChromecastGroup(host_list=filter_ip_list(self.config.CHROMECAST_TESLA_GROUP),
-                                                  volumes=filter_volume_list(self.config.CHROMECAST_TESLA_GROUP))
+            self.telemetry("chromecast", "Connecting to Chromecast...")
+            print(f"Chromecast config: {self.config.CHROMECAST_TESLA_GROUP}")
+            self.cc_tesla_group = ChromecastGroup(
+                host_list=filter_ip_list(self.config.CHROMECAST_TESLA_GROUP),
+                volumes=filter_volume_list(self.config.CHROMECAST_TESLA_GROUP),
+            )
+            self.telemetry("chromecast", f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
+            print(f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
+            print(f"Chromecast group: {self.cc_tesla_group}")
         except Exception as e:
             print(f"[tesla_hue_nest] Chromecast init failed: {e}. Continuing without sound system.")
+            self.telemetry("chromecast", f"Chromecast initialization failed: {e}")
             self.cc_tesla_group = _DummyChromecastGroup()
 
-        # Hue (lights + motion sensors)
+
+    def _connect_hue(self):
+        """Blocking init for the Philips Hue bridge and motion sensors.
+
+        On success sets `self.hue_lights`, `self.hue_manager`, and
+        `self.motion_sensors`. On failure sets `self.hue_manager` to a
+        `_NullHueManager` and `self.motion_sensors` to an empty list.
+        """
+        exceptions_raised = {'lights': None, 'sensors': None}
+        
         try:
-            print('Connecting to Hue...')
+            print('Connecting to Hue Lights...')
+            self.telemetry("phillips hue", "Connecting to Hue lights...")
             self.hue_lights = connect_hue_lights(self.config.HUE_BRIDGE_IP, self.config.HUE_SPOT_LIGHT)
             self.hue_manager = HueManager(self.hue_lights)
-            # motion_sensors are HueSensor instances; if Hue init fails, we won't have sensors
+        except Exception as e:
+            print(f"[tesla_hue_nest] Hue lights init failed: {e}. Continuing without lights.")
+            self.telemetry("phillips hue", f"Hue lights initialization failed: {e}")
+            self.hue_manager = _NullHueManager()    
+            self.hue_lights = []
+            exceptions_raised['lights'] = e
+
+        try:
+            print('Connecting to Hue Motion Sensors...')
+            self.telemetry("phillips hue", "Connecting to Hue motion sensors...")
             self.motion_sensors = [HueSensor(self.config.HUE_BRIDGE_IP, name) for name in self.config.MOTION_SENSORS]
         except Exception as e:
-            print(f"[tesla_hue_nest] Hue init failed: {e}. Continuing without lights/motion sensors.")
-            self.hue_manager = _NullHueManager()
-            # Provide an empty sensor list so polling won't crash
+            print(f"[tesla_hue_nest] Hue motion sensor init failed: {e}. Continuing without motion sensors.")
+            self.telemetry("phillips hue", f"Hue motion sensor initialization failed: {e}")
             self.motion_sensors = []
+            exceptions_raised['sensors'] = e
 
-        # Tesla (optional)
+        if exceptions_raised['lights'] is None or exceptions_raised['sensors'] is None:
+            out_str = f"Connected; {len(self.motion_sensors)} motion sensors; {len(self.hue_lights)} lights."
+        else:
+            out_str = "Failed to connect to Hue lights and motion sensors. Exceptions: " + ", ".join(
+                [f"{k}: {v}" for k, v in exceptions_raised.items() if v is not None]
+            )
+        print(out_str)
+        self.telemetry("phillips hue", out_str)
+
+    def _connect_tesla(self):
+        """Blocking init for the Tesla integration.
+
+        If `self.config.USE_TESLA` is True, attempt to create `self.tesla_car`.
+        On failure set `self.tesla_car = None` so other code can continue.
+        """
         print('Connecting to Tesla...')
         if self.config.USE_TESLA:
             try:
+                self.telemetry("tesla", "Connecting to Tesla...")
                 self.tesla_car = TeslaCar(self.config.TESLA_AUTH_TOKEN, self.config.VEHICLE_TAG)
                 self.tesla_car.close_trunk(trunk_check=False)
+                self.telemetry("tesla", f"Connected to Tesla: {self.tesla_car.vehicle_id}")
             except Exception as e:
                 print(f"[tesla_hue_nest] Tesla init failed: {e}. Continuing without Tesla integration.")
+                self.telemetry("tesla", f"Tasla initialization failed: {e}")
                 self.tesla_car = None
         else:
             self.tesla_car = None
+            self.telemetry("tesla", "Tesla integration is disabled in config.")
 
     async def start(self) -> None:
         """
@@ -771,6 +863,7 @@ class Worker(BaseWorker):
             action: The command action string.
             arg: An optional argument string for the command.
         """
+        print(f"Handling command: {action}({arg})")
         if action and self.current_state and hasattr(self.current_state, 'on_action'):
             # Call the state's on_action method
             self.current_state.on_action(self, action, arg)
@@ -858,6 +951,9 @@ class Worker(BaseWorker):
                     self.hue_manager.send_command('green')
                 case 'blue':
                     self.hue_manager.send_command('blue')
+                case 'connect':
+                    # call the _connect_hue method to reconnect
+                    await asyncio.to_thread(self._connect_hue)
                 case _:
                     print(f"Unknown Hue action: {action}")
         elif isinstance(arg, dict):
@@ -873,23 +969,67 @@ class Worker(BaseWorker):
         Args:
             arg: A string or dictionary specifying the Chromecast action to perform.
         """
-        if self.cc_tesla_group is None or self.cc_tesla_group.is_empty():
+        
+        if isinstance(arg, str):
+            action = arg.lower()
+            if action == 'connect':
+                # call the _connect_chromecast method to reconnect
+                await asyncio.to_thread(self._connect_chromecast)
+                return
+        elif self.cc_tesla_group is None or self.cc_tesla_group.is_empty():
             print("Chromecast group is not available.")
             return
+
+        print(f"do_chromecast called with arg: {arg}")
+
+        # Always refresh status first
+        await asyncio.to_thread(self.cc_tesla_group.refresh)
+        for cast in self.cc_tesla_group.chromecasts:
+            try:
+                print(f"Device: {cast.cast_info.friendly_name} at {cast.cast_info.host}: {cast.media_controller.status}")
+            except Exception as e:
+                print(f"Error updating status for {cast}")
+                print(f"Exception: {e}")
 
         if isinstance(arg, str):
             action = arg.lower()
             match action:
                 case 'play':
-                    self.cc_tesla_group.play()
+                    url_list = filter_url_list(self.config.CHROMECAST_TESLA_GROUP)
+                    # Prefer the non-blocking background loader which guarantees the
+                    # track is PAUSED when ready (unless autoplay=True). This avoids
+                    # the race between load_media() and a subsequent play() call.
+                    if hasattr(self.cc_tesla_group, 'load_media_bg'):
+                        try:
+                            task = self.cc_tesla_group.load_media_bg(url_list=url_list, autoplay=False)
+                            # Await the asyncio.Future bridge so we resume after
+                            # the group is ready (and paused) for playback.
+                            await task.as_future()
+                        except Exception as e:
+                            print(f"Chromecast background load failed: {e}")
+                            # Fallback to the legacy blocking load
+                            await asyncio.to_thread(self.cc_tesla_group.load_media, url_list=url_list)
+                    else:
+                        # Older / dummy groups may not implement the new API
+                        await asyncio.to_thread(self.cc_tesla_group.load_media, url_list=url_list)
+
+                    # wait a moment for status to update
+                    await asyncio.sleep(1)
+
+                    # Now explicitly start playback
+                    await asyncio.to_thread(self.cc_tesla_group.play)
+
                 case 'stop':
-                    self.cc_tesla_group.stop()
+                    await asyncio.to_thread(self.cc_tesla_group.stop)
                 case 'volume_up':
-                    self.cc_tesla_group.volume_up()
+                    await asyncio.to_thread(self.cc_tesla_group.volume_up)
                 case 'volume_down':
-                    self.cc_tesla_group.volume_down()
+                    await asyncio.to_thread(self.cc_tesla_group.volume_down)
                 case 'fade_to_stop':
-                    self.cc_tesla_group.fade_to_stop()
+                    await asyncio.to_thread(self.cc_tesla_group.fade_to_stop)
+                case 'connect':
+                    # call the _connect_chromecast method to reconnect
+                    await asyncio.to_thread(self._connect_chromecast)
                 case _:
                     print(f"Unknown Chromecast action: {action}")
         elif isinstance(arg, dict):
@@ -898,4 +1038,13 @@ class Worker(BaseWorker):
         else:
             print("Invalid argument for Chromecast command.")
         
-        
+        # Always refresh status first
+        await asyncio.to_thread(self.cc_tesla_group.refresh)
+        for cast in self.cc_tesla_group.chromecasts:
+            try:
+                print(f"Device: {cast.cast_info.friendly_name} at {cast.cast_info.host}: {cast.media_controller.status}")
+            except Exception as e:
+                print(f"Error updating status for {cast}")
+                print(f"Exception: {e}")
+
+

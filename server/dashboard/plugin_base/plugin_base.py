@@ -158,6 +158,7 @@ class BasePlugin(ABC):
         def _publish(topic, payload, **kwargs):
             if self._mqtt:
                 try:
+                    print(f"[plugin:{self.__class__.__name__}] Publishing to {topic}: {payload}")
                     return self._mqtt.publish(topic, payload, **kwargs)
                 except Exception:
                     # don't let a publishing error break plugin registration

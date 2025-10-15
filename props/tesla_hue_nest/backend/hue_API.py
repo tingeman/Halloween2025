@@ -57,6 +57,9 @@ class HueLights:
         self.list_lights()
         
         
+    def __len__(self) -> int:
+        return len(self.lights)
+
     def lights_off(self, transitiontime=50):
         self.disco_on = False
         cmd = self.commands['dimmed']

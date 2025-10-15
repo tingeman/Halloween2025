@@ -55,6 +55,7 @@ class Plugin(BasePlugin):
             html.Div(className="d-flex gap-2 mb-2", children=[
                 html.Label("Hue:"),
                 html.Button("Toggle Disco", id="thn-hue-disco", n_clicks=0),
+                html.Button("(Re)Connect", id="thn-hue-connect", n_clicks=0),
             ]),
 
             # Chromecast/Nest controls
@@ -65,8 +66,10 @@ class Plugin(BasePlugin):
                 html.Button("Fade to Stop", id="thn-cc-fade", n_clicks=0),
                 html.Button("Vol Up", id="thn-cc-vol-up", n_clicks=0),
                 html.Button("Vol Down", id="thn-cc-vol-down", n_clicks=0),
+                html.Button("(Re)Connect", id="thn-cc-connect", n_clicks=0),
                 dcc.Input(id="thn-cc-volume-val", type="number", min=0, max=1, step=0.1, value=0.5, style={"width": "5em"}),
                 html.Button("Set Vol", id="thn-cc-set-vol", n_clicks=0),
+                html.Button("Log status", id="thn-cc-log", n_clicks=0),
             ]),
 
             # Telemetry display
@@ -96,15 +99,18 @@ class Plugin(BasePlugin):
         self._register_button(app, "thn-tesla-trunk", {"action": "actuate_trunk"})
 
         # Hue
-        self._register_button(app, "thn-hue-disco", {"action": "toggle_disco"})
+        self._register_button(app, "thn-hue-disco", {"action": "hue", "args": "toggle_disco"})
+        # Hue reconnect
+        self._register_button(app, "thn-hue-connect", {"action": "hue", "args": "connect"})
 
         # Chromecast
-        self._register_button(app, "thn-cc-play", {"action": "play"})
-        self._register_button(app, "thn-cc-stop", {"action": "stop"})
-        self._register_button(app, "thn-cc-fade", {"action": "fade_to_stop"})
-        self._register_button(app, "thn-cc-vol-up", {"action": "volume_up"})
-        self._register_button(app, "thn-cc-vol-down", {"action": "volume_down"})
-        
+        self._register_button(app, "thn-cc-play", {"action": "chromecast", "args": "play"})
+        self._register_button(app, "thn-cc-stop", {"action": "chromecast", "args": "stop"})
+        self._register_button(app, "thn-cc-fade", {"action": "chromecast", "args": "fade_to_stop"})
+        self._register_button(app, "thn-cc-vol-up", {"action": "chromecast", "args": "volume_up"})
+        self._register_button(app, "thn-cc-vol-down", {"action": "chromecast", "args": "volume_down"})
+        self._register_button(app, "thn-cc-connect", {"action": "chromecast", "args": "connect"})
+
         @app.callback(
             Output("thn-cc-set-vol", "n_clicks"),
             Input("thn-cc-set-vol", "n_clicks"),
