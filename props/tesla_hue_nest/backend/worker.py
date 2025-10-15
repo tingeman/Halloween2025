@@ -567,8 +567,8 @@ class Worker(BaseWorker):
         # Create an instance of the new state, passing self as the context
         self.current_state = new_state_class(self)
         
-        # Publish the new state via MQTT
-        self.status("state", state_name)   
+        self.publish_state(state_name)
+
 
     # --- NEW: Async Command Bridge ---
     async def do_command(self, action: str | None, arg: str | None):
@@ -607,7 +607,8 @@ class Worker(BaseWorker):
 
         except Exception as e:
             print(f"FATAL: ERROR initializing integrations: {e}")
-            self.status("state", "error")
+            # Publish an error state so the dashboard can reflect initialization failure
+            self.publish_state("error", qos=1)
             # Do not start the poll loop if init fails
             return False
         return True
