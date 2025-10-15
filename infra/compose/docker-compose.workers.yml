@@ -10,6 +10,7 @@
       - mqtt
     env_file:
       - ../../config/secrets/mqtt_users.env
+      - ../../config/secrets/tesla.env
       - ../../config/worker_host.env
     environment:
       - PYTHONPATH=/app:/opt/libs/py:/opt/builtin_workers
