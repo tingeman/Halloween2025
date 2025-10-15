@@ -54,7 +54,7 @@ class BaseWorker:
             return
         action, arg = self._parse_cmd_payload(msg.payload)
         if not action:
-            self.status("warn", "Empty/invalid command payload")
+            self.publish_status("warn", "Empty/invalid command payload")
             return
         handler_name = f"do_{action.replace('/', '_')}"
         if hasattr(self, handler_name):
@@ -66,7 +66,7 @@ class BaseWorker:
                 else:
                     await asyncio.to_thread(handler, arg)
             except Exception as e:
-                self.status("error", f"{type(e).__name__}: {e}")
+                self.publish_status("error", f"{type(e).__name__}: {e}")
         elif hasattr(self, "do_command"):
             handler = getattr(self, "do_command")
             try:
@@ -75,9 +75,9 @@ class BaseWorker:
                 else:
                     await asyncio.to_thread(handler, action, arg)
             except Exception as e:
-                self.status("error", f"{type(e).__name__}: {e}")
+                self.publish_status("error", f"{type(e).__name__}: {e}")
         else:
-            self.status("warn", f"Unknown action: {action}")
+            self.publish_status("warn", f"Unknown action: {action}")
 
     # --- Helpers for workers ---
     def spawn(self, coro) -> None:
@@ -181,7 +181,36 @@ class BaseWorker:
 
     @staticmethod
     def _parse_cmd_payload(payload: bytes) -> tuple[Optional[str], Optional[str]]:
-        """Accept either JSON {'action': 'x', 'args': 'y'} or plain text 'x y...'."""
+        """
+        Parse an MQTT command payload into an (action, arg) pair.
+
+        Supported payload shapes:
+        - JSON object with an `action` key and optional `args` key, e.g.
+          {"action": "arm", "args": "now"}
+          - If `args` is a dict or list, it will be returned as a JSON-encoded
+            string to keep the return type simple.
+          - If `args` is a scalar, it will be coerced to str.
+        - Plain text: a single word `action` or `action arg...` where the first
+          space separates the action and the argument (argument may contain spaces).
+
+        Behavior and return value:
+        - Returns a tuple (action, arg) where `action` is a non-empty string
+          representing the command name and `arg` is either a string or None.
+        - If the payload is empty or cannot be parsed, returns (None, None).
+
+        Examples:
+        - b'{"action":"arm"}' -> ("arm", None)
+        - b'{"action":"play","args":{"url":"/x.mp3"}}' -> ("play", '{"url":"/x.mp3"}')
+        - b"stop now" -> ("stop", "now")
+        - b"reboot" -> ("reboot", None)
+
+        Args:
+            payload: Raw MQTT message payload as bytes.
+
+        Returns:
+            Tuple[action, arg] where action is the command name (or None on
+            failure) and arg is a string argument (or None).
+        """
         if not payload:
             return None, None
         p = payload.decode("utf-8", errors="ignore").strip()
