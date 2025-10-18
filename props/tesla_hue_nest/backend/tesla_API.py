@@ -162,7 +162,11 @@ class TeslaCar:
         print(f"Charge state: {self.vehicle_data['charge_state']['battery_level']}%")
         #print(f"Rear trunk:   {self.vehicle_data['vehicle_state']['rt']}")   
         print(f"Rear trunk:   {'Open' if self.trunk_open else 'Closed'}")
-
+        return {"name": self.vehicle_data['vehicle_state']['vehicle_name'], 
+                "state": self.vehicle_data['state'], 
+                "battery": self.vehicle_data['charge_state']['battery_level'], 
+                "trunk": "Open" if self.trunk_open else "Closed"}
+    
     def get_vehicle_state(self, trunk_check=False):
         try:
             self.vehicle_data = self.api.vehicle_data()
