@@ -16,7 +16,7 @@ run_disco = True
 class HueBridge:
     def __init__(self, bridge_ip):
         self.bridge_ip = bridge_ip
-        self.b = Bridge(hue_bridge_ip)        
+        self.b = Bridge(bridge_ip)        
 
 
 class HueLights:
@@ -38,7 +38,7 @@ class HueLights:
     def __init__(self, bridge_ip, light_pattern):
         self.run_disco = False
         self.bridge_ip = bridge_ip
-        self.b = Bridge(hue_bridge_ip)
+        self.b = Bridge(bridge_ip)
                 
         # get lights
         lights = self.b.get_light_objects('name')
@@ -54,6 +54,7 @@ class HueLights:
                 self.lights[light_name] = lights[light_name]
 
         self.lights_uids = [l.light_id for l in self.lights.values()]
+        self.lights_types = [l.type for l in self.lights.values()]
         self.list_lights()
         
         
@@ -81,12 +82,29 @@ class HueLights:
         
         if cmd == 'off':
             self.disco_on = False
+
+        bw_uids = []
+        color_uids = []
+
+        for id, uid in enumerate(uids):
+            if 'color' in self.lights_types[id]:
+                color_uids.append(uid)
+            else:
+                bw_uids.append(uid)
         
-        self.b.set_light(uids, cmd_dict)
-            
+        if len(color_uids)>0:
+            self.b.set_light(color_uids, cmd_dict)
+        if len(bw_uids)>0:
+            # Remove color keys for bw lights
+            bw_cmd = {k: v for k, v in cmd_dict.items() if k not in ['hue', 'sat']}
+            self.b.set_light(bw_uids, bw_cmd)
+
     def list_lights(self):
         for id, (n, l) in enumerate(self.lights.items()):
-            print("{0})  {1:30}     'on': {2:>5s}, 'bri': {3:>3d}, 'hue': {4:>5d}, 'sat': {5:>3d}".format(id, n, (lambda x: 'True' if x else 'False')(l.on), l.brightness, l.hue, l.saturation))  
+            try:
+                print("{0})  {1:30}     'on': {2:>5s}, 'bri': {3:>3d}, 'hue': {4:>5d}, 'sat': {5:>3d}".format(id, n, (lambda x: 'True' if x else 'False')(l.on), l.brightness, l.hue, l.saturation))
+            except Exception as e:
+                print("{0})  {1:30}     'on': {2:>5s}, 'bri': {3:>3d}".format(id, n, (lambda x: 'True' if x else 'False')(l.on), l.brightness))
 
     def start_disco(self, uids=None):
         self.disco_on = True
@@ -118,7 +136,7 @@ class HueLights:
 class HueSensor:
     def __init__(self, bridge_ip, sensor_pattern):
         self.bridge_ip = bridge_ip
-        self.b = Bridge(hue_bridge_ip)
+        self.b = Bridge(bridge_ip)
                 
         # get sensors and lights
         sensors = self.b.get_sensor_objects('name')
