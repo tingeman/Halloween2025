@@ -434,6 +434,26 @@ class ChromecastGroup:
             result = result or (cast.media_controller.status.player_state == 'UNKNOWN')
         return result
 
+    def state(self):
+        # return PLAYING if any device is playing
+        # else BUFFERING if any device is buffering
+        # else PAUSED if any device is paused
+        # else STOPPED if all devices are stopped
+        # else UNKNOWN
+        state = 'STOPPED'
+        for cast in self.chromecasts:
+            if cast.media_controller.status.player_state == 'PLAYING':
+                return 'PLAYING'
+            elif cast.media_controller.status.player_state == 'BUFFERING':
+                state = 'BUFFERING'
+            elif cast.media_controller.status.player_state == 'PAUSED':
+                if state != 'BUFFERING':
+                    state = 'PAUSED'
+            elif cast.media_controller.status.player_state == 'UNKNOWN':
+                if state not in ['BUFFERING', 'PAUSED']:
+                    state = 'UNKNOWN'   
+        
+
     def queue_repeat_single(self):
         for cast in self.chromecasts: 
             queue_repeat(cast, QUEUE_REPEAT_SINGLE)
