@@ -142,8 +142,8 @@ class BaseWorker:
         # If it's not a placeholder string, return the value directly
         return value
 
-    def telemetry(self, key: str, value: Any, qos: int = 0) -> None:
-        self.mqtt.publish(f"halloween/{self.prop_id}/telemetry/{key}", str(value), qos=qos)
+    def telemetry(self, key: str, value: Any, qos: int = 0, retain: bool = False) -> None:
+        self.mqtt.publish(f"halloween/{self.prop_id}/telemetry/{key}", str(value), qos=qos, retain=retain)
         print(f"telemetry: halloween/{self.prop_id}/telemetry/{key}={value}")
 
     def publish_status(self, key: str, value: Any, qos: int = 0, retain: bool = False) -> None:

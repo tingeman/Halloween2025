@@ -48,7 +48,8 @@ class Plugin(BasePlugin):
             # Tesla controls
             html.Div(className="d-flex gap-2 mb-2", children=[
                 html.Label("Tesla:"),
-                html.Button("Actuate Trunk", id="thn-tesla-trunk", n_clicks=0),
+                html.Button("Open Trunk", id="thn-tesla-open-trunk", n_clicks=0),
+                html.Button("Close Trunk", id="thn-tesla-close-trunk", n_clicks=0),
             ]),
 
             # Hue controls
@@ -96,10 +97,11 @@ class Plugin(BasePlugin):
         self._register_button(app, "thn-stop", "stop")
 
         # Tesla
-        self._register_button(app, "thn-tesla-trunk", {"action": "actuate_trunk"})
+        self._register_button(app, "thn-tesla-open-trunk", {"action": "tesla", "args": "open_trunk"})
+        self._register_button(app, "thn-tesla-close-trunk", {"action": "tesla", "args": "close_trunk"})
 
         # Hue
-        self._register_button(app, "thn-hue-disco", {"action": "hue", "args": "toggle_disco"})
+        self._register_button(app, "thn-hue-disco", {"action": "hue", "args": "disco"})
         # Hue reconnect
         self._register_button(app, "thn-hue-connect", {"action": "hue", "args": "connect"})
 

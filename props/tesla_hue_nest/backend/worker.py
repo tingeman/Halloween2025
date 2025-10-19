@@ -61,6 +61,16 @@ class State(ABC):
         """Initializes the state."""
         pass 
 
+    def on_enter(self, context):
+        """Optional entry hook called once (in the worker sync thread)
+
+        Implement blocking initialization here if the state requires it.
+        This will be invoked by the worker before the first call to
+        `handle()` for the new state, ensuring initialization completes on
+        the synchronous thread.
+        """
+        return None
+
     @abstractmethod
     def handle(self, context):
         """
@@ -162,7 +172,7 @@ class ArmingState(State):
         """Initializes the arming state."""
         print("System is arming...")
 
-    def handle(self, context):
+    def on_enter(self, context):
         """
         Loads media onto the Chromecast group and transitions to WaitingState.
         """
@@ -170,10 +180,28 @@ class ArmingState(State):
         if context.cc_tesla_group.is_empty():
             print('No Tesla chromecast found, cannot play media.')
         else:
-            context.cc_tesla_group.load_media(url_list=filter_url_list(context.config.CHROMECAST_TESLA_GROUP))
-            print('Tesla media loaded and ready...')
+            url_list = filter_url_list(context.config.CHROMECAST_TESLA_GROUP)
+            # Prefer background loader which guarantees paused-on-ready
+            if hasattr(context.cc_tesla_group, 'load_media_bg'):
+                try:
+                    task = context.cc_tesla_group.load_media_bg(url_list=url_list, autoplay=False)
+                    # wait synchronously in the sync-thread for readiness
+                    task.join()
+                    print('Tesla media loaded (background) and ready...')
+                except Exception as e:
+                    print(f'Background load failed: {e}; falling back to blocking load')
+                    context.cc_tesla_group.load_media(url_list=url_list)
+            else:
+                context.cc_tesla_group.load_media(url_list=url_list)
+                print('Tesla media loaded and ready...')
 
         context.set_state(WaitingState)
+
+    def handle(self, context):
+        """
+        Runs every poll tick. No actions needed in this state.
+        """
+        pass
 
     def on_action(self, context, action, arg):
         print(f"{self.__class__.__name__}::action passed: {action}, arg: {arg}")
@@ -260,38 +288,61 @@ class PlayingState(State):
     detected.
     """
     def __init__(self, context):
-        """
-        Initializes the playing sequence.
+        """Initialize lightweight state variables for the playing sequence.
 
-        Checks if the cooldown period has passed. If so, it starts the media,
-        opens the trunk, and sets the lights. If not, it transitions to the
-        CooldownState.
+        Heavy I/O (device commands) are performed in on_enter(), which will be
+        executed in the worker's synchronous thread before handle() is called.
         """
         self.wait_between_plays = context.config.WAIT_BETWEEN_PLAYS
         self.timeout_interval = context.config.MOTION_TIMEOUT  # Timeout interval in seconds
         self.last_motion_time = time.monotonic()
+        # Flag to guard repeated on_enter execution if needed
+        self._entered = False
+
+    def on_enter(self, context):
+        """Perform blocking initialization (safe in sync thread):
+
+        - enforce cooldown between plays
+        - query Tesla vehicle state
+        - start media playback and open trunk as configured
+        - send hue commands
+        """
+        if self._entered:
+            return
+        self._entered = True
 
         # Check if WAIT_BETWEEN_PLAYS seconds have passed since last play
         delta_time = time.monotonic() - context.time_of_last_play
         if delta_time < self.wait_between_plays:
-            # --- REFACTORED ---
-            # Instead of sleeping, transition to the new CooldownState
             context.set_state(CooldownState)
             return
-        
-        if context.config.USE_TESLA:
-            context.tesla_car.get_vehicle_state()
+
+        if context.config.USE_TESLA and context.tesla_car is not None:
+            try:
+                context.tesla_car.get_vehicle_state()
+            except Exception as e:
+                self.telemetry("tesla/error", f"get_vehicle_state failed: {e}")
 
         print("System is playing...")
         context.time_of_last_play = time.monotonic()
         context.play_counter += 1
-        context.hue_manager.send_command('purple')
+        # Hue command (safe to call even if null manager)
+        try:
+            context.hue_manager.send_command('purple')
+        except Exception:
+            pass
 
         if not context.cc_tesla_group.is_empty():
-            context.cc_tesla_group.play()
-        
-        if context.config.USE_TESLA:
-            context.tesla_car.open_trunk()
+            try:
+                context.cc_tesla_group.play()
+            except Exception:
+                pass
+
+        if context.config.USE_TESLA and context.tesla_car is not None:
+            try:
+                context.tesla_car.open_trunk()
+            except Exception:
+                pass
 
     def handle(self, context):
         """
@@ -491,6 +542,8 @@ class _DummyChromecastGroup:
         return None
     def fade_to_stop(self):
         return None
+    def state(self):
+        return "No Chromecast devices"
 
 
 # ============================ UTILS ============================
@@ -533,8 +586,11 @@ def connect_hue_lights(bridge_ip, light_name):
     Returns:
         An initialized HueLights object.
     """
+    print(f"connecting...")    
     lights = HueLights(bridge_ip, light_name)
+    print(f"sending command off...")
     lights.send_command('off')
+    print(f"command off sent")
     return lights
 
 # ============================ WORKER CLASS ============================
@@ -578,6 +634,18 @@ class Worker(BaseWorker):
         self.motion_sensors = []
         self.cc_tesla_group = _DummyChromecastGroup()  # Default to dummy group
         self.tesla_car = None
+        # When set_state is called we set this flag; the sync thread will
+        # call the state's on_enter() exactly once before calling handle().
+        self._state_needs_enter = False
+        # Queue for telemetry work that must run in the sync thread
+        # (chromecast.state(), tesla queries, etc. may block and must not
+        # run on the asyncio event loop). Use a Queue so both sync and async
+        # callers can enqueue work safely.
+        self._telemetry_queue = queue.Queue()
+        # Flag flipped while _run_sync_tasks is executing to allow
+        # set_state() to perform telemetry immediately when called from
+        # the sync thread.
+        self._in_sync_thread = False
 
 
     # --- NEW: State Management Method ---
@@ -600,7 +668,9 @@ class Worker(BaseWorker):
         
         # Create an instance of the new state, passing self as the context
         self.current_state = new_state_class(self)
-        
+        # Mark that the state's on_enter() needs to run in the sync thread
+        self._state_needs_enter = True
+
         self.publish_state(state_name)
 
 
@@ -670,18 +740,20 @@ class Worker(BaseWorker):
         """
         try:
             print('Connecting to sound system...')
-            self.telemetry("chromecast", "Connecting to Chromecast...")
+            self.telemetry("chromecast/state", "Connecting to Chromecast...")
             print(f"Chromecast config: {self.config.CHROMECAST_TESLA_GROUP}")
             self.cc_tesla_group = ChromecastGroup(
                 host_list=filter_ip_list(self.config.CHROMECAST_TESLA_GROUP),
                 volumes=filter_volume_list(self.config.CHROMECAST_TESLA_GROUP),
             )
-            self.telemetry("chromecast", f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
+            self.telemetry("chromecast/state", f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
             print(f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
             print(f"Chromecast group: {self.cc_tesla_group}")
+            self.telemetry("chromecast/speakers", f"{len(self.cc_tesla_group.chromecasts)} connected.", retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Chromecast init failed: {e}. Continuing without sound system.")
-            self.telemetry("chromecast", f"Chromecast initialization failed: {e}")
+            self.telemetry("chromecast/state", f"Chromecast initialization failed: {e}")
+            self.telemetry("chromecast/speakers", "0 connected.", retain=True)
             self.cc_tesla_group = _DummyChromecastGroup()
 
 
@@ -696,23 +768,35 @@ class Worker(BaseWorker):
         
         try:
             print('Connecting to Hue Lights...')
-            self.telemetry("phillips hue", "Connecting to Hue lights...")
+            self.telemetry("hue/state", f"Connecting to Hue lights... (bridge: {self.config.HUE_BRIDGE_IP})")
             self.hue_lights = connect_hue_lights(self.config.HUE_BRIDGE_IP, self.config.HUE_SPOT_LIGHT)
             self.hue_manager = HueManager(self.hue_lights)
+            print(f"Connected to Hue lights: {self.hue_lights}")
+            print(f"Connected to Hue lights: {self.hue_lights.lights}")
+            self.telemetry("hue/state", f"Connected to Hue lights: {self.config.HUE_SPOT_LIGHT}")
+            self.telemetry("hue/lights", f"{len(self.hue_lights)} connected.", retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Hue lights init failed: {e}. Continuing without lights.")
-            self.telemetry("phillips hue", f"Hue lights initialization failed: {e}")
-            self.hue_manager = _NullHueManager()    
+            # print the traceback for debugging
+            import traceback
+            traceback.print_exc()
+        
+            self.telemetry("hue/state", f"Hue lights initialization failed: {e}")
+            self.telemetry("hue/lights", "0 connected.", retain=True)
+            self.hue_manager = _NullHueManager()
             self.hue_lights = []
             exceptions_raised['lights'] = e
 
         try:
             print('Connecting to Hue Motion Sensors...')
-            self.telemetry("phillips hue", "Connecting to Hue motion sensors...")
+            self.telemetry("hue/state", "Connecting to Hue motion sensors...")
             self.motion_sensors = [HueSensor(self.config.HUE_BRIDGE_IP, name) for name in self.config.MOTION_SENSORS]
+            self.telemetry("hue/state", f"Connected to {len(self.motion_sensors)} Hue motion sensors.")
+            self.telemetry("hue/sensors", f"{len(self.motion_sensors)} connected.", retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Hue motion sensor init failed: {e}. Continuing without motion sensors.")
-            self.telemetry("phillips hue", f"Hue motion sensor initialization failed: {e}")
+            self.telemetry("hue/state", f"Hue motion sensor initialization failed: {e}")
+            self.telemetry("hue/sensors", "0 connected.", retain=True)
             self.motion_sensors = []
             exceptions_raised['sensors'] = e
 
@@ -723,7 +807,7 @@ class Worker(BaseWorker):
                 [f"{k}: {v}" for k, v in exceptions_raised.items() if v is not None]
             )
         print(out_str)
-        self.telemetry("phillips hue", out_str)
+        self.telemetry("hue/state", out_str)
 
     def _connect_tesla(self):
         """Blocking init for the Tesla integration.
@@ -734,17 +818,23 @@ class Worker(BaseWorker):
         print('Connecting to Tesla...')
         if self.config.USE_TESLA:
             try:
-                self.telemetry("tesla", "Connecting to Tesla...")
+                self.telemetry("tesla/state", "Connecting to Tesla...")
                 self.tesla_car = TeslaCar(self.config.TESLA_AUTH_TOKEN, self.config.VEHICLE_TAG)
                 self.tesla_car.close_trunk(trunk_check=False)
-                self.telemetry("tesla", f"Connected to Tesla: {self.tesla_car.vehicle_id}")
+                self.telemetry("tesla/state", f"Connected")
+                self.telemetry("tesla/VehicleID", f"{self.tesla_car.vehicle_id}", retain=True)
+                self.telemetry("tesla/Trunk", "Closed", retain=True)
             except Exception as e:
                 print(f"[tesla_hue_nest] Tesla init failed: {e}. Continuing without Tesla integration.")
-                self.telemetry("tesla", f"Tasla initialization failed: {e}")
+                self.telemetry("tesla/state", f"Tasla initialization failed: {e}")
+                self.telemetry("tesla/VehicleID", "None", retain=True)
+                self.telemetry("tesla/Trunk", "Unknown", retain=True)
                 self.tesla_car = None
         else:
             self.tesla_car = None
-            self.telemetry("tesla", "Tesla integration is disabled in config.")
+            self.telemetry("tesla/state", "Tesla integration is disabled in config.")
+            self.telemetry("tesla/VehicleID", "None", retain=True)
+            self.telemetry("tesla/Trunk", "Unknown", retain=True)
 
     async def start(self) -> None:
         """
@@ -797,10 +887,13 @@ class Worker(BaseWorker):
         print("Cleaning up resources...")
         if hasattr(self, 'hue_manager'):
             self.hue_manager.lights_off()
+            self.telemetry("hue/state", "Off", retain=True)
         if hasattr(self, 'cc_tesla_group') and self.cc_tesla_group is not None:
             self.cc_tesla_group.stop()
+            self.telemetry("chromecast/state", "Stopped", retain=True)
         if hasattr(self, 'tesla_car') and self.config.USE_TESLA and self.tesla_car is not None:
             self.tesla_car.close_trunk(trunk_check=True)
+            self.telemetry("tesla/Trunk", "Closed", retain=True)
 
     async def _poll_loop(self):
         """
@@ -817,16 +910,27 @@ class Worker(BaseWorker):
                 # Check for a command without blocking
                 # The queue contains (action, arg) tuples
                 action, arg = self.command_queue.get_nowait()
-                self._handle_command(action, arg)
             except queue.Empty:
-                pass # No command, continue on
+                action = None
+                arg = None
+
+            if action is not None:
+                try:
+                    self._handle_command(action, arg)
+                except Exception as e:
+                    # Do not let command handler exceptions kill the poll loop
+                    self.telemetry("error", f"Command handler error: {e}")
 
             # --- Run Synchronous, Blocking Code in a Thread ---
             # This prevents your API calls (Hue, Tesla) from freezing the event loop.
-            await asyncio.to_thread(self._run_sync_tasks)
+            try:
+                await asyncio.to_thread(self._run_sync_tasks)
+            except Exception as e:
+                # Log and continue; do not kill the main loop
+                self.telemetry("error", f"_run_sync_tasks failed: {e}")
 
             # Use the non-blocking sleep
-            await asyncio.sleep(0.2)            
+            await asyncio.sleep(0.2)
             
 
     def _run_sync_tasks(self):
@@ -838,21 +942,72 @@ class Worker(BaseWorker):
         the motion sensors. It is designed to be called via `asyncio.to_thread`
         from the main async poll loop.
         """
+
+        # If a new state requires entry initialization, run it now (sync thread)
+        if getattr(self, '_state_needs_enter', False) and self.current_state is not None:
+            try:
+                self.current_state.on_enter(self)
+                self._collect_and_send_telemetry()
+            except Exception as e:
+                self.telemetry("error", f"State on_enter error: {e}")
+            finally:
+                self._state_needs_enter = False
+
         # Delegate the main work to the current state's handle method
         if self.current_state:
-            self.current_state.handle(self)
+            try:
+                self.current_state.handle(self)
+            except Exception as e:
+                self.telemetry("error", f"State handle error: {e}")
 
         # Poll for motion and delegate
         motion_detected = False
         for sensor in self.motion_sensors: # Corrected variable name from your __init__
-            sensor.refresh()
-            if sensor.presence:
+            try:
+                sensor.refresh()
+            except Exception as e:
+                self.telemetry("sensor/error", f"Sensor refresh failed: {e}")
+                continue
+            if getattr(sensor, 'presence', False):
                 motion_detected = True
                 break 
         
         if motion_detected:
             if self.current_state:
                 self.current_state.on_motion(self)
+
+
+    def _collect_and_send_telemetry(self):
+        """
+        Collect telemetry values that may block (chromecast.state(), tesla
+        attributes, etc.) and send them via the worker's telemetry() helper.
+
+        This method must be executed in the sync thread.
+        """
+        try:
+            # Tesla trunk state
+            try:
+                trunk = "Open" if (self.tesla_car is not None) and (getattr(self.tesla_car, 'trunk_open', False)) else "Closed"
+            except Exception:
+                trunk = "Unknown"
+            self.telemetry("tesla/Trunk", trunk, retain=True)
+
+            # Hue scene
+            try:
+                hue_scene = "Disco" if getattr(self.hue_manager.lights, 'disco_on', False) else "Off"
+            except Exception:
+                hue_scene = "Unknown"
+            self.telemetry("hue/Scene", hue_scene, retain=True)
+
+            # Chromecast state (may block)
+            try:
+                chromecast_state = self.cc_tesla_group.state()
+            except Exception:
+                chromecast_state = "unknown"
+            self.telemetry("chromecast/State", chromecast_state, retain=True)
+        except Exception as e:
+            # Ensure telemetry collection doesn't raise in the sync thread
+            print(f"Telemetry collection failed: {e}")
 
 
     def _handle_command(self, action: str, arg: str | None):
@@ -925,6 +1080,8 @@ class Worker(BaseWorker):
         else:
             print("Invalid argument for Tesla command.")
 
+        self.telemetry("tesla/Trunk", "Open" if self.tesla_car.trunk_open else "Closed", retain=True)
+
     async def do_hue(self, arg: str | dict | None):
         """
         Handles the 'hue' command to perform Hue light actions.
@@ -956,11 +1113,14 @@ class Worker(BaseWorker):
                     await asyncio.to_thread(self._connect_hue)
                 case _:
                     print(f"Unknown Hue action: {action}")
+
         elif isinstance(arg, dict):
             # Handle dictionary-based commands if needed
             print("Dictionary-based Hue commands are not implemented.")
         else:
             print("Invalid argument for Hue command.")
+
+        self.telemetry("hue/state", "Disco" if self.hue_manager.lights.disco_on else "Off", retain=True)
 
     async def do_chromecast(self, arg: str | dict | None):
         """
@@ -1047,4 +1207,5 @@ class Worker(BaseWorker):
                 print(f"Error updating status for {cast}")
                 print(f"Exception: {e}")
 
-
+        self.telemetry("chromecast/state", self.cc_tesla_group.state(), retain=True)
+                       
