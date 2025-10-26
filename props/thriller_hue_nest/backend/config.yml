@@ -1,0 +1,32 @@
+# Configuration for the Tesla/Hue/Nest Prop
+
+# --- BEHAVIOR CONSTANTS ---
+MOTION_TIMEOUT: 60        # how long to keep playing when no motion is registered
+WAIT_BETWEEN_PLAYS: 30     # 30 seconds between plays
+
+# --- HUE SETTINGS ---
+# The HUE_BRIDGE_IP should be set in a central/secret config if shared
+# For now, we can place it here.
+HUE_BRIDGE_IP: "10.67.1.54" # <-- IMPORTANT: Set your bridge IP here
+HUE_SPOT_LIGHT: "Halloween Spot"
+MOTION_SENSORS:
+  - "halloween"
+  - "Hue outdoor motion sensor 1"
+  - "Hue outdoor motion sensor 2"
+
+# --- CHROMECAST SETTINGS ---
+CHROMECAST_THRILLER_GROUP:
+  - name: "greeter"
+    IP: "10.67.1.252"
+    url: "http://10.67.1.135:8000/Halloween%20soundtrack2023.mp3"
+    volume: 0.5
+    repeat: false
+
+  - name: "bbq_skeleton"
+    IP: "10.67.1.251"
+    url: "http://10.67.1.135:8000/Halloween%20soundtrack2023.mp3"
+    volume: 0.5
+    repeat: false
+
+
+
