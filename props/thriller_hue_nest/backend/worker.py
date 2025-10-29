@@ -1,6 +1,7 @@
 # server/worker_host/builtin_workers/heartbeat.py
 from __future__ import annotations
 import asyncio
+import json
 import queue
 import time
 from abc import ABC, abstractmethod 
@@ -1056,13 +1057,23 @@ class Worker(BaseWorker):
             arg: A string or dictionary specifying the Chromecast action to perform.
         """
         
+        # Try to parse JSON string to dict
+        if isinstance(arg, str):
+            try:
+                parsed = json.loads(arg)
+                if isinstance(parsed, dict):
+                    arg = parsed
+            except (json.JSONDecodeError, ValueError):
+                pass  # Keep as string if not valid JSON
+        
         if isinstance(arg, str):
             action = arg.lower()
             if action == 'connect':
                 # call the _connect_chromecast method to reconnect
                 await asyncio.to_thread(self._connect_chromecast)
                 return
-        elif self.cc_thriller_group is None or self.cc_thriller_group.is_empty():
+        
+        if self.cc_thriller_group is None or self.cc_thriller_group.is_empty():
             print("Chromecast group is not available.")
             return
 
@@ -1119,8 +1130,13 @@ class Worker(BaseWorker):
                 case _:
                     print(f"Unknown Chromecast action: {action}")
         elif isinstance(arg, dict):
-            # Handle dictionary-based commands if needed
-            print("Dictionary-based Chromecast commands are not implemented.")
+            # Handle dictionary-based commands (e.g., volume_set with volume parameter)
+            if 'volume' in arg:
+                volume = float(arg['volume'])
+                print(f"Setting chromecast volume to {volume}")
+                await asyncio.to_thread(self.cc_thriller_group.set_volume, volume)
+            else:
+                print(f"Unknown dictionary-based Chromecast command: {arg}")
         else:
             print("Invalid argument for Chromecast command.")
         

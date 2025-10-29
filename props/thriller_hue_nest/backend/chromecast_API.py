@@ -403,11 +403,11 @@ class ChromecastGroup:
 
     def volume_up(self):
         for id, cast in enumerate(self.chromecasts): 
-            return cast.volume_up()
+            cast.volume_up()
 
     def volume_down(self):
         for id, cast in enumerate(self.chromecasts): 
-            return cast.volume_down()
+            cast.volume_down()
 
 
     def any_playing(self):

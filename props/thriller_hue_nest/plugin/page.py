@@ -108,7 +108,7 @@ class Plugin(BasePlugin):
         )
         def _set_volume(_, volume):
             if volume is not None:
-                self.mqtt_publish(self.T_CMD, json.dumps({"action": "volume_set", "args": {"volume": float(volume)}}))
+                self.mqtt_publish(self.T_CMD, json.dumps({"action": "chromecast", "args": {"volume": float(volume)}}))
             return 0
 
     def _register_button(self, app, button_id, command):
