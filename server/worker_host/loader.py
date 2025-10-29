@@ -18,6 +18,10 @@ DISABLE_ALL_BUILTINS = os.getenv("WORKER_DISABLE_ALL_BUILTINS", "0") == "1"
 BUILTINS_ALLOW = _csv_set("WORKER_BUILTINS_ALLOW")      # e.g. "heartbeat,smoketest"
 BUILTINS_DISABLE = _csv_set("WORKER_BUILTINS_DISABLE")  # e.g. "heartbeat"
 
+DISABLE_ALL_PROPS = os.getenv("WORKER_DISABLE_ALL_PROPS", "0") == "1"
+PROPS_ALLOW = _csv_set("WORKER_PROPS_ALLOW")      # e.g. "coffin_jumper,tesla_hue_nest"
+PROPS_DISABLE = _csv_set("WORKER_PROPS_DISABLE")  # e.g. "example_prop"
+
 @dataclass
 class WorkerDesc:
     prop_id: str
@@ -184,6 +188,17 @@ def _builtin_enabled(name: str) -> bool:
         return name not in BUILTINS_DISABLE
     return True
 
+def _prop_enabled(name: str) -> bool:
+    """Check if prop worker is enabled via environment variables."""
+    # Precedence: disable-all → allow-list (if set) → disable-list
+    if DISABLE_ALL_PROPS:
+        return False
+    if PROPS_ALLOW:
+        return name in PROPS_ALLOW
+    if PROPS_DISABLE:
+        return name not in PROPS_DISABLE
+    return True
+
 def discover_workers(props_root: Path, builtin_root: Optional[Path] = None) -> List[WorkerDesc]:
     workers: List[WorkerDesc] = []
 
@@ -213,7 +228,11 @@ def discover_workers(props_root: Path, builtin_root: Optional[Path] = None) -> L
 
     # Prop backends
     for worker_py in sorted(Path(props_root).glob("*/backend/worker.py")):
-        mod_name = f"prop_worker_{worker_py.parent.parent.name}"
+        prop_name = worker_py.parent.parent.name
+        if not _prop_enabled(prop_name):
+            print(f"[worker_loader] Skipping prop '{prop_name}' (disabled by env)")
+            continue
+        mod_name = f"prop_worker_{prop_name}"
         desc = _try_load_one(mod_name, worker_py)
         if desc:
             workers.append(desc)

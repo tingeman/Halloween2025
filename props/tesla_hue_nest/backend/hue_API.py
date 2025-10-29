@@ -43,15 +43,24 @@ class HueLights:
         # get lights
         lights = self.b.get_light_objects('name')
                 
-        # Get the appropriate lights
+        # Get the appropriate lights (only include reachable ones)
         self.lights = {}
         self.lights_uids = []
         light_pattern = light_pattern.lower()
         
+        unreachable_lights = []
         for light_name in lights.keys():
             if light_pattern in light_name.lower():
-                #print('{0}'.format(light_name))
-                self.lights[light_name] = lights[light_name]
+                light = lights[light_name]
+                # Check if light is reachable before adding it
+                if light.reachable:
+                    self.lights[light_name] = light
+                else:
+                    unreachable_lights.append(light_name)
+        
+        # Report unreachable lights that matched the pattern
+        if unreachable_lights:
+            print(f"Found {len(unreachable_lights)} unreachable light(s) matching pattern '{light_pattern}': {', '.join(unreachable_lights)}")
 
         self.lights_uids = [l.light_id for l in self.lights.values()]
         self.lights_types = [l.type for l in self.lights.values()]

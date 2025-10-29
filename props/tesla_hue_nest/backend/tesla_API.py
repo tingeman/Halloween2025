@@ -142,7 +142,7 @@ class TeslaCar:
     def wake_up(self, timeout=20):
         if not self.api.is_online():
             print(f"{self.__class__.__name__}::Vehicle is offline, attempting to wake up...")
-            ipdb.set_trace()
+            # ipdb.set_trace()  # Debug breakpoint - commented out for production
             res = self.api.wake_up()
             time.sleep(1)
             counter = 1

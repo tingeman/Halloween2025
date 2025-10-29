@@ -11,6 +11,18 @@ import types
 import os
 DEBUG = os.getenv("DASHBOARD_DEBUG", "0") == "1"
 
+def _csv_set(envname: str) -> set[str]:
+    v = os.getenv(envname, "")
+    return {s.strip() for s in v.split(",") if s.strip()}
+
+DISABLE_ALL_BUILTINS = os.getenv("PLUGIN_DISABLE_ALL_BUILTINS", "0") == "1"
+BUILTINS_ALLOW = _csv_set("PLUGIN_BUILTINS_ALLOW")      # e.g. "system_status"
+BUILTINS_DISABLE = _csv_set("PLUGIN_BUILTINS_DISABLE")  # e.g. "example_plugin"
+
+DISABLE_ALL_PROPS = os.getenv("PLUGIN_DISABLE_ALL_PROPS", "0") == "1"
+PROPS_ALLOW = _csv_set("PLUGIN_PROPS_ALLOW")      # e.g. "tesla_hue_nest,thriller_hue_nest"
+PROPS_DISABLE = _csv_set("PLUGIN_PROPS_DISABLE")  # e.g. "example_prop"
+
 
 @dataclass
 class PluginDesc:
@@ -117,6 +129,30 @@ def _try_load_one(module_name: str, file_path: Path) -> PluginDesc | None:
     return desc
 
 
+def _builtin_enabled(name: str) -> bool:
+    """Check if builtin plugin is enabled via environment variables."""
+    # Precedence: disable-all → allow-list (if set) → disable-list
+    if DISABLE_ALL_BUILTINS:
+        return False
+    if BUILTINS_ALLOW:
+        return name in BUILTINS_ALLOW
+    if BUILTINS_DISABLE:
+        return name not in BUILTINS_DISABLE
+    return True
+
+
+def _prop_enabled(name: str) -> bool:
+    """Check if prop plugin is enabled via environment variables."""
+    # Precedence: disable-all → allow-list (if set) → disable-list
+    if DISABLE_ALL_PROPS:
+        return False
+    if PROPS_ALLOW:
+        return name in PROPS_ALLOW
+    if PROPS_DISABLE:
+        return name not in PROPS_DISABLE
+    return True
+
+
 def discover_plugins(props_root: str, builtins_root: str) -> List[Dict]:
     """
     Discover plugins from:
@@ -129,13 +165,21 @@ def discover_plugins(props_root: str, builtins_root: str) -> List[Dict]:
 
     # Built-in plugins
     for f in sorted(Path(builtins_root).glob("*.py")):
-        desc = _try_load_one(f"builtin_{f.stem}", f)
+        plugin_name = f.stem
+        if not _builtin_enabled(plugin_name):
+            print(f"[plugin_loader] Skipping builtin plugin '{plugin_name}' (disabled by env)")
+            continue
+        desc = _try_load_one(f"builtin_{plugin_name}", f)
         if desc:
             plugins.append({"name": desc.name, "layout": desc.layout, "register": desc.register, "zone": desc.zone})
 
     # Prop plugins
     for page in sorted(Path(props_root).glob("*/plugin/page.py")):
-        mod_name = f"plugin_{page.parent.parent.name}"
+        prop_name = page.parent.parent.name
+        if not _prop_enabled(prop_name):
+            print(f"[plugin_loader] Skipping prop plugin '{prop_name}' (disabled by env)")
+            continue
+        mod_name = f"plugin_{prop_name}"
         desc = _try_load_one(mod_name, page)
         if desc:
             plugins.append({"name": desc.name, "layout": desc.layout, "register": desc.register, "zone": desc.zone})

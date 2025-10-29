@@ -3,31 +3,22 @@
 # --- BEHAVIOR CONSTANTS ---
 MOTION_TIMEOUT: 60        # how long to keep playing when no motion is registered
 WAIT_BETWEEN_PLAYS: 30     # 30 seconds between plays
+TELEMETRY_INTERVAL: 10     # how often to send telemetry updates (seconds)
 USE_TESLA: True
 
 # --- HUE SETTINGS ---
 # The HUE_BRIDGE_IP should be set in a central/secret config if shared
 # For now, we can place it here.
-# HUE_BRIDGE_IP: "10.67.1.54" # <-- IMPORTANT: Set your bridge IP here
-# HUE_SPOT_LIGHT: "Halloween Tesla"
-# MOTION_SENSORS:
-#   - "halloween"
-#   # - "another_sensor_name"
-HUE_BRIDGE_IP: "192.168.254.4" # <-- IMPORTANT: Set your bridge IP here
-HUE_SPOT_LIGHT: "halloween"
+HUE_BRIDGE_IP: "10.67.1.54" # <-- IMPORTANT: Set your bridge IP here
+HUE_SPOT_LIGHT: "Halloween Tesla"
+HUE_PLAYING_SCENE: "purple"  # Options: 'disco' or color ('red', 'yellow', 'pink', 'purple', 'normal', 'normal_lstr', 'dimmed')
 MOTION_SENSORS:
   - "halloween"
 
-
-
 # --- CHROMECAST SETTINGS ---
 CHROMECAST_TESLA_GROUP:
-  # - IP: "10.67.1.250"
-  #   url: "http://10.67.1.135:8000/The_skeleton_dance_Oscar_Pascasio.mp3"
-  #   volume: 0.5
-  #   repeat: false
-  - IP: "192.168.254.1"
-    url: "http://192.168.254.3:8000/The_skeleton_dance_Oscar_Pascasio.mp3"
+  - IP: "10.67.1.250"
+    url: "http://10.67.1.135:8000/The_skeleton_dance_Oscar_Pascasio.mp3"
     volume: 0.5
     repeat: false
 

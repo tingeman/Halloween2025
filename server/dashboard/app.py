@@ -41,7 +41,7 @@ server = app.server
 # Separate zones
 topbar_items = [p["layout"]() for p in PLUGINS if p["zone"] == "topbar"]
 card_items   = [
-    dbc.Card(dbc.CardBody(p["layout"]()), className="mb-3 shadow-sm")
+    dbc.Card(dbc.CardBody(p["layout"]()), className="shadow-sm mb-3")
     for p in PLUGINS if p["zone"] == "card"
 ]
 
@@ -58,8 +58,20 @@ app.layout = dbc.Container([
     navbar(),
     # Global tick that plugins can use if they need a steady refresh
     dcc.Interval(id="global-tick", interval=1000, n_intervals=0),
-    html.Div(id="cards-area", children=card_items),
-], fluid=True)
+    html.Div(
+        className="d-flex flex-nowrap overflow-auto gap-3",
+        id="cards-area", 
+        children=[
+            html.Div(card, className="flex-shrink-0", style={"width": "min(550px, 90vw)"})
+            for card in card_items
+        ],
+        style={
+            "height": "calc(100vh - 80px)",  # Full viewport height minus navbar
+            "overflowY": "auto",              # Allow vertical scroll within cards area
+            "overflowX": "auto",              # Allow horizontal scroll
+        }
+    ),
+], fluid=True, style={"height": "100vh", "overflow": "hidden"})
 
 # Register plugin callbacks with shared services
 SERVICES = {"mqtt": mqtt, "cache": CACHE, "app": app, "tick_id": "global-tick"}

@@ -15,7 +15,7 @@ from .chromecast_API import *
 from .hue_API import *
 from .tesla_API import *
 
-PROP_ID = "tesla_hue_nest_worker"
+PROP_ID = "tesla_hue_nest"
 
 
 # ============================ CONFIG MODEL ============================
@@ -35,6 +35,8 @@ class ConfigModel(BaseSettings):
     WAIT_BETWEEN_PLAYS: int = 480
     MOTION_TIMEOUT: int = 180
     HUE_SPOT_LIGHT: str = "Halloween Tesla"
+    HUE_PLAYING_SCENE: str = "purple"  # Options: 'disco' or color name ('red', 'yellow', 'pink', 'purple', 'normal', etc.)
+    TELEMETRY_INTERVAL: int = 10  # How often to send telemetry updates (seconds)
     tick_interval: int = 5
 
     # Use BaseSettings' model_config to control env file behavior. Docker
@@ -136,7 +138,7 @@ class StoppedState(State):
             context.hue_manager.lights.disco_on = False
             context.hue_manager.lights.send_command('purple', transitiontime=1)
 
-            if context.config.USE_TESLA:
+            if context.config.USE_TESLA and context.tesla_car is not None:
                 context.tesla_car.close_trunk(trunk_check=True)
 
             if context.cc_tesla_group is not None and not context.cc_tesla_group.is_empty():
@@ -328,8 +330,15 @@ class PlayingState(State):
         context.play_counter += 1
         # Hue command (safe to call even if null manager)
         try:
-            context.hue_manager.send_command('purple')
-        except Exception:
+            if context.config.HUE_PLAYING_SCENE.lower() == 'disco':
+                if not context.hue_manager.lights.disco_on:
+                    context.hue_manager.lights.start_disco()
+                    print("Starting disco mode...")
+            else:
+                # Send static color command
+                context.hue_manager.send_command(context.config.HUE_PLAYING_SCENE)
+        except Exception as e:
+            print(f"Failed to set hue scene: {e}")
             pass
 
         if not context.cc_tesla_group.is_empty():
@@ -410,7 +419,7 @@ class FadeOutState(State):
         context.hue_manager.lights.disco_on = False
         context.hue_manager.lights.send_command('purple', transitiontime=self.transition_time * 10) # phue uses 1/10s
 
-        if context.config.USE_TESLA:
+        if context.config.USE_TESLA and context.tesla_car is not None:
             context.tesla_car.close_trunk(trunk_check=True)
 
         if context.cc_tesla_group is not None and not context.cc_tesla_group.is_empty():
@@ -605,7 +614,7 @@ class Worker(BaseWorker):
     responds to motion sensor events.
     """
 
-    NAME = "tesla_hue_nest_worker"
+    NAME = "tesla_hue_nest"
 
     def __init__(self, prop_id, mqtt_client, config: ConfigModel | None = None):
         """
@@ -637,6 +646,8 @@ class Worker(BaseWorker):
         # When set_state is called we set this flag; the sync thread will
         # call the state's on_enter() exactly once before calling handle().
         self._state_needs_enter = False
+        # Timer for periodic telemetry collection
+        self.last_telemetry_time = time.monotonic()
         # Queue for telemetry work that must run in the sync thread
         # (chromecast.state(), tesla queries, etc. may block and must not
         # run on the asyncio event loop). Use a Queue so both sync and async
@@ -740,20 +751,20 @@ class Worker(BaseWorker):
         """
         try:
             print('Connecting to sound system...')
-            self.telemetry("chromecast/state", "Connecting to Chromecast...")
+            self.telemetry("speakers/Status", "Connecting to Chromecast...")
             print(f"Chromecast config: {self.config.CHROMECAST_TESLA_GROUP}")
             self.cc_tesla_group = ChromecastGroup(
                 host_list=filter_ip_list(self.config.CHROMECAST_TESLA_GROUP),
                 volumes=filter_volume_list(self.config.CHROMECAST_TESLA_GROUP),
             )
-            self.telemetry("chromecast/state", f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
+            self.telemetry("speakers/Status", f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
             print(f"Connected to {len(self.cc_tesla_group.chromecasts)} Chromecast devices.")
             print(f"Chromecast group: {self.cc_tesla_group}")
-            self.telemetry("chromecast/speakers", f"{len(self.cc_tesla_group.chromecasts)} connected.", retain=True)
+            self.telemetry("speakers/SpeakersCount", len(self.cc_tesla_group.chromecasts), retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Chromecast init failed: {e}. Continuing without sound system.")
-            self.telemetry("chromecast/state", f"Chromecast initialization failed: {e}")
-            self.telemetry("chromecast/speakers", "0 connected.", retain=True)
+            self.telemetry("speakers/Status", f"Chromecast initialization failed: {e}")
+            self.telemetry("speakers/SpeakersCount", 0, retain=True)
             self.cc_tesla_group = _DummyChromecastGroup()
 
 
@@ -774,7 +785,7 @@ class Worker(BaseWorker):
             print(f"Connected to Hue lights: {self.hue_lights}")
             print(f"Connected to Hue lights: {self.hue_lights.lights}")
             self.telemetry("hue/state", f"Connected to Hue lights: {self.config.HUE_SPOT_LIGHT}")
-            self.telemetry("hue/lights", f"{len(self.hue_lights)} connected.", retain=True)
+            self.telemetry("hue/LightsCount", len(self.hue_lights), retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Hue lights init failed: {e}. Continuing without lights.")
             # print the traceback for debugging
@@ -782,7 +793,7 @@ class Worker(BaseWorker):
             traceback.print_exc()
         
             self.telemetry("hue/state", f"Hue lights initialization failed: {e}")
-            self.telemetry("hue/lights", "0 connected.", retain=True)
+            self.telemetry("hue/LightsCount", 0, retain=True)
             self.hue_manager = _NullHueManager()
             self.hue_lights = []
             exceptions_raised['lights'] = e
@@ -792,11 +803,11 @@ class Worker(BaseWorker):
             self.telemetry("hue/state", "Connecting to Hue motion sensors...")
             self.motion_sensors = [HueSensor(self.config.HUE_BRIDGE_IP, name) for name in self.config.MOTION_SENSORS]
             self.telemetry("hue/state", f"Connected to {len(self.motion_sensors)} Hue motion sensors.")
-            self.telemetry("hue/sensors", f"{len(self.motion_sensors)} connected.", retain=True)
+            self.telemetry("hue/SensorsCount", len(self.motion_sensors), retain=True)
         except Exception as e:
             print(f"[tesla_hue_nest] Hue motion sensor init failed: {e}. Continuing without motion sensors.")
             self.telemetry("hue/state", f"Hue motion sensor initialization failed: {e}")
-            self.telemetry("hue/sensors", "0 connected.", retain=True)
+            self.telemetry("hue/SensorsCount", 0, retain=True)
             self.motion_sensors = []
             exceptions_raised['sensors'] = e
 
@@ -807,7 +818,7 @@ class Worker(BaseWorker):
                 [f"{k}: {v}" for k, v in exceptions_raised.items() if v is not None]
             )
         print(out_str)
-        self.telemetry("hue/state", out_str)
+        self.telemetry("hue/Status", out_str, retain=True)
 
     def _connect_tesla(self):
         """Blocking init for the Tesla integration.
@@ -890,7 +901,7 @@ class Worker(BaseWorker):
             self.telemetry("hue/state", "Off", retain=True)
         if hasattr(self, 'cc_tesla_group') and self.cc_tesla_group is not None:
             self.cc_tesla_group.stop()
-            self.telemetry("chromecast/state", "Stopped", retain=True)
+            self.telemetry("speakers/State", "Stopped", retain=True)
         if hasattr(self, 'tesla_car') and self.config.USE_TESLA and self.tesla_car is not None:
             self.tesla_car.close_trunk(trunk_check=True)
             self.telemetry("tesla/Trunk", "Closed", retain=True)
@@ -948,6 +959,7 @@ class Worker(BaseWorker):
             try:
                 self.current_state.on_enter(self)
                 self._collect_and_send_telemetry()
+                self.last_telemetry_time = time.monotonic()  # Reset timer after state transition
             except Exception as e:
                 self.telemetry("error", f"State on_enter error: {e}")
             finally:
@@ -959,6 +971,16 @@ class Worker(BaseWorker):
                 self.current_state.handle(self)
             except Exception as e:
                 self.telemetry("error", f"State handle error: {e}")
+
+        # Periodic telemetry collection
+        current_time = time.monotonic()
+        if current_time - self.last_telemetry_time > self.config.TELEMETRY_INTERVAL:
+            try:
+                self._collect_and_send_telemetry()
+            except Exception as e:
+                self.telemetry("error", f"Telemetry collection error: {e}")
+            finally:
+                self.last_telemetry_time = current_time
 
         # Poll for motion and delegate
         motion_detected = False
@@ -999,12 +1021,12 @@ class Worker(BaseWorker):
                 hue_scene = "Unknown"
             self.telemetry("hue/Scene", hue_scene, retain=True)
 
-            # Chromecast state (may block)
+            # Speaker/Chromecast player state (may block)
             try:
-                chromecast_state = self.cc_tesla_group.state()
+                speaker_state = self.cc_tesla_group.state()
             except Exception:
-                chromecast_state = "unknown"
-            self.telemetry("chromecast/State", chromecast_state, retain=True)
+                speaker_state = "unknown"
+            self.telemetry("speakers/State", speaker_state, retain=True)
         except Exception as e:
             # Ensure telemetry collection doesn't raise in the sync thread
             print(f"Telemetry collection failed: {e}")
@@ -1207,5 +1229,5 @@ class Worker(BaseWorker):
                 print(f"Error updating status for {cast}")
                 print(f"Exception: {e}")
 
-        self.telemetry("chromecast/state", self.cc_tesla_group.state(), retain=True)
+        self.telemetry("speakers/State", self.cc_tesla_group.state(), retain=True)
                        

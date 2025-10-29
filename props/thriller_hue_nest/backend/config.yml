@@ -3,12 +3,14 @@
 # --- BEHAVIOR CONSTANTS ---
 MOTION_TIMEOUT: 60        # how long to keep playing when no motion is registered
 WAIT_BETWEEN_PLAYS: 30     # 30 seconds between plays
+TELEMETRY_INTERVAL: 10     # how often to send telemetry updates (seconds)
 
 # --- HUE SETTINGS ---
 # The HUE_BRIDGE_IP should be set in a central/secret config if shared
 # For now, we can place it here.
 HUE_BRIDGE_IP: "10.67.1.54" # <-- IMPORTANT: Set your bridge IP here
 HUE_SPOT_LIGHT: "Halloween Spot"
+HUE_PLAYING_SCENE: "disco"  # Options: 'disco' or color ('red', 'yellow', 'pink', 'purple', 'normal', 'normal_lstr', 'dimmed')
 MOTION_SENSORS:
   - "halloween"
   - "Hue outdoor motion sensor 1"

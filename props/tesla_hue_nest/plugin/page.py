@@ -18,7 +18,7 @@ class Plugin(BasePlugin):
     path = "/tesla_hue_nest_worker"
 
     # MQTT Topics
-    PROP_ID = "tesla_hue_nest_worker"
+    PROP_ID = "tesla_hue_nest"
     T_CMD = f"halloween/{PROP_ID}/cmd"
     T_AVAIL = f"halloween/{PROP_ID}/availability"
     T_STATE = f"halloween/{PROP_ID}/state"
@@ -74,9 +74,7 @@ class Plugin(BasePlugin):
             ]),
 
             # Telemetry display
-            html.Table(id="thn-telem", children=[
-                html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])])
-            ]),
+            html.Div(id="thn-telem", className="small"),
         ])
 
     def on_register(self, app, services):
@@ -144,12 +142,32 @@ class Plugin(BasePlugin):
         self.cache["thn_state"] = payload.decode("utf-8", "replace")
 
     def _on_telem(self, topic, payload: bytes):
-        key = topic.split("/")[-1]
+        # Parse topic: halloween/tesla_hue_nest/telemetry/category/key or halloween/tesla_hue_nest/telemetry/key
+        parts = topic.split("/")
         value = payload.decode("utf-8", "replace")
+        
         with self.cache.locked() as backing:
             if "thn_telem" not in backing:
                 backing["thn_telem"] = {}
-            backing["thn_telem"][key] = value
+            
+            # If topic has category/key structure (e.g., hue/Scene, speakers/Status)
+            if len(parts) >= 5 and "/" in parts[-1]:
+                # Already has category prefix in the key
+                full_key = "/".join(parts[4:])  # Everything after telemetry/
+                backing["thn_telem"][full_key] = value
+            elif len(parts) >= 5:
+                # Multi-part: category/key
+                category = parts[-2] if len(parts) > 4 else ""
+                key = parts[-1]
+                if category:
+                    full_key = f"{category}/{key}"
+                else:
+                    full_key = key
+                backing["thn_telem"][full_key] = value
+            else:
+                # Single part key (e.g., tick)
+                key = parts[-1]
+                backing["thn_telem"][key] = value
 
     # --- Render Callbacks ---
     def _render_avail(self, _):
@@ -174,10 +192,85 @@ class Plugin(BasePlugin):
         return html.Span(state, className=f"badge bg-{color} text-white")
 
     def _render_telem(self, _):
-        """Render the telemetry table."""
+        """Render the telemetry table grouped by category."""
         telem = self.cache.get("thn_telem", {})
         if not telem:
-            return html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])])
+            return html.Div("telemetry: —")
         
-        rows = [html.Tr([html.Td(k), html.Td(v)]) for k, v in sorted(telem.items())]
-        return html.Tbody(rows)
+        # Group telemetry by category
+        categories = {
+            "tesla": {},
+            "hue": {},
+            "speakers": {},
+            "other": {}
+        }
+        
+        for key, value in telem.items():
+            if "/" in key:
+                category, subkey = key.split("/", 1)
+                if category in categories:
+                    categories[category][subkey] = value
+                else:
+                    categories["other"][key] = value
+            else:
+                categories["other"][key] = value
+        
+        # Build single table with rowspan for category labels
+        rows = []
+        
+        # Tesla section
+        if categories["tesla"]:
+            items = sorted(categories["tesla"].items())
+            for i, (key, value) in enumerate(items):
+                if i == 0:
+                    rows.append(html.Tr([
+                        html.Td(html.Strong("Tesla:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})
+                    ]))
+                else:
+                    rows.append(html.Tr([html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}), html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})]))
+        
+        # Hue section
+        if categories["hue"]:
+            items = sorted(categories["hue"].items())
+            for i, (key, value) in enumerate(items):
+                if i == 0:
+                    rows.append(html.Tr([
+                        html.Td(html.Strong("Hue:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})
+                    ]))
+                else:
+                    rows.append(html.Tr([html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}), html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})]))
+        
+        # Speakers section
+        if categories["speakers"]:
+            items = sorted(categories["speakers"].items())
+            for i, (key, value) in enumerate(items):
+                if i == 0:
+                    rows.append(html.Tr([
+                        html.Td(html.Strong("Speakers:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})
+                    ]))
+                else:
+                    rows.append(html.Tr([html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}), html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})]))
+        
+        # Other section
+        if categories["other"]:
+            items = sorted(categories["other"].items())
+            for i, (key, value) in enumerate(items):
+                if i == 0:
+                    rows.append(html.Tr([
+                        html.Td(html.Strong("Other:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                        html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})
+                    ]))
+                else:
+                    rows.append(html.Tr([html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}), html.Td(value, style={"wordBreak": "break-word", "maxWidth": "0"})]))
+        
+        if not rows:
+            return html.Div("telemetry: —")
+        
+        return html.Table(className="table table-sm mb-0", style={"tableLayout": "auto"}, children=[html.Tbody(rows)])

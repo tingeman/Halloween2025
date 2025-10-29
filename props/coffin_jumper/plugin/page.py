@@ -51,9 +51,7 @@ class Plugin(BasePlugin):
             # will populate this table with rows showing the current
             # telemetry snapshot. We keep the initial placeholder so the
             # DOM element exists before the first tick.
-            html.Table(id="cj-telem", children=[
-                html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])])
-            ]),
+            html.Div(id="cj-telem", className="small"),
             html.Div(className="d-flex gap-2 mb-2", children=[
                 html.Button("Trigger", id="cj-trigger", n_clicks=0),
                 html.Button("Stop Action", id="cj-stop-action", n_clicks=0),
@@ -327,28 +325,77 @@ class Plugin(BasePlugin):
         return 0
 
     def _render_telem(self, _):
-        """Render the cached telemetry dict as pretty-printed JSON.
+        """Render the cached telemetry dict as a grouped table.
 
         This is driven by the same periodic tick as the other render to
         avoid mixing UI updates across different timers.
         """
         telem = self.cache.get("cj_telem")
         if not telem:
-            # return a small table with a placeholder
-            return html.Table(html.Tbody([html.Tr([html.Td("telemetry:"), html.Td("—")])]))
+            return html.Div("telemetry: —")
+        
         try:
-            # Build table rows for each telemetry key/value
-            rows = []
-            # ensure stable ordering for the UI
+            # Group telemetry by category (parse keys like "category/key")
+            categories = {}
+            other_items = {}
+            
             for k in sorted(telem.keys()):
                 v = telem[k]
+                # Convert complex values to formatted strings
                 if isinstance(v, (dict, list)):
-                    cell = html.Pre(json.dumps(v, indent=2, sort_keys=True), style={"whiteSpace": "pre-wrap"})
+                    display_value = json.dumps(v, indent=2, sort_keys=True)
                 else:
-                    cell = str(v)
-                rows.append(html.Tr([html.Td(k), html.Td(cell)]))
-
-            return html.Table(html.Tbody(rows), className="table table-sm")
+                    display_value = str(v)
+                
+                # Try to split by "/" to get category
+                if "/" in k:
+                    category, subkey = k.split("/", 1)
+                    if category not in categories:
+                        categories[category] = []
+                    categories[category].append((subkey, display_value))
+                else:
+                    other_items[k] = display_value
+            
+            # Build single table with rowspan for category labels
+            rows = []
+            
+            # Add categorized items
+            for category in sorted(categories.keys()):
+                items = categories[category]
+                for i, (key, value) in enumerate(items):
+                    if i == 0:
+                        rows.append(html.Tr([
+                            html.Td(html.Strong(f"{category.capitalize()}:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(value if not isinstance(telem.get(f"{category}/{key}"), (dict, list)) else html.Pre(value, style={"whiteSpace": "pre-wrap", "margin": 0}))
+                        ]))
+                    else:
+                        rows.append(html.Tr([
+                            html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(value if not isinstance(telem.get(f"{category}/{key}"), (dict, list)) else html.Pre(value, style={"whiteSpace": "pre-wrap", "margin": 0}))
+                        ]))
+            
+            # Add uncategorized items
+            if other_items:
+                items = list(other_items.items())
+                for i, (key, value) in enumerate(items):
+                    if i == 0:
+                        rows.append(html.Tr([
+                            html.Td(html.Strong("Other:"), rowSpan=len(items), className="align-top", style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(value if not isinstance(telem.get(key), (dict, list)) else html.Pre(value, style={"whiteSpace": "pre-wrap", "margin": 0}))
+                        ]))
+                    else:
+                        rows.append(html.Tr([
+                            html.Td(key, style={"width": "1%", "whiteSpace": "nowrap"}),
+                            html.Td(value if not isinstance(telem.get(key), (dict, list)) else html.Pre(value, style={"whiteSpace": "pre-wrap", "margin": 0}))
+                        ]))
+            
+            if not rows:
+                return html.Div("telemetry: —")
+            
+            return html.Table(className="table table-sm mb-0", style={"tableLayout": "auto"}, children=[html.Tbody(rows)])
+            
         except Exception:
-            # Fallback to str() if JSON serialization fails
-            return html.Table(html.Tbody([html.Tr([html.Td("telemetry:"), html.Td(str(telem))])]))
+            # Fallback to simple display if anything fails
+            return html.Div(f"telemetry: {str(telem)}")
