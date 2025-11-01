@@ -1,8 +1,8 @@
 # Configuration for the Tesla/Hue/Nest Prop
 
 # --- BEHAVIOR CONSTANTS ---
-MOTION_TIMEOUT: 60        # how long to keep playing when no motion is registered
-WAIT_BETWEEN_PLAYS: 30     # 30 seconds between plays
+MOTION_TIMEOUT: 120        # how long to keep playing when no motion is registered
+WAIT_BETWEEN_PLAYS: 120     # 30 seconds between plays
 TELEMETRY_INTERVAL: 10     # how often to send telemetry updates (seconds)
 USE_TESLA: True
 
@@ -19,7 +19,7 @@ MOTION_SENSORS:
 CHROMECAST_TESLA_GROUP:
   - IP: "10.67.1.250"
     url: "http://10.67.1.135:8000/The_skeleton_dance_Oscar_Pascasio.mp3"
-    volume: 0.5
+    volume: 0.9
     repeat: false
 
 

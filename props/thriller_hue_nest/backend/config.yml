@@ -21,13 +21,13 @@ CHROMECAST_THRILLER_GROUP:
   - name: "greeter"
     IP: "10.67.1.252"
     url: "http://10.67.1.135:8000/Halloween%20soundtrack2023.mp3"
-    volume: 0.5
+    volume: 0.9
     repeat: false
 
   - name: "bbq_skeleton"
     IP: "10.67.1.251"
     url: "http://10.67.1.135:8000/Halloween%20soundtrack2023.mp3"
-    volume: 0.5
+    volume: 0.9
     repeat: false
 
 
