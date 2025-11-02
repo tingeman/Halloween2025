@@ -5,6 +5,7 @@ A modular, MQTT-based Halloween automation system with web dashboard, prop worke
 ## 🎃 Overview
 
 This system orchestrates multiple Halloween props (animatronics, lights, sound effects) through:
+
 - **MQTT Broker** (Mosquitto) for message passing
 - **Web Dashboard** (Plotly Dash) for monitoring and control
 - **Worker Host** for prop backend logic
@@ -21,6 +22,7 @@ This system orchestrates multiple Halloween props (animatronics, lights, sound e
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Docker & Docker Compose
 - (Optional) Python 3.11+ for local development
 
@@ -55,6 +57,7 @@ EOF
 ### 2. Launch the System
 
 #### Full Stack (All Services)
+
 ```bash
 docker compose -f infra/compose/docker-compose.yml \
                -f infra/compose/docker-compose.workers.yml \
@@ -88,11 +91,13 @@ docker compose -f infra/compose/docker-compose.yml \
 #### Individual Services
 
 **MQTT Broker Only:**
+
 ```bash
 docker compose -f docker-compose.yml up --build
 ```
 
 **Dashboard Only:**
+
 ```bash
 docker compose -f docker-compose.yml \
                -f docker-compose.dashboard.yml \
@@ -100,6 +105,7 @@ docker compose -f docker-compose.yml \
 ```
 
 **Workers Only:**
+
 ```bash
 docker compose -f docker-compose.yml \
                -f docker-compose.workers.yml \
@@ -108,11 +114,11 @@ docker compose -f docker-compose.yml \
 
 ### 3. Access the Dashboard
 
-Open your browser to: **http://localhost:8050**
+Open your browser to: **<http://localhost:8050>**
 
 ## 📁 Project Structure
 
-```
+```text
 halloween-2025/
 ├── config/                      # Configuration files
 │   ├── dashboard.env            # Dashboard settings
@@ -206,14 +212,17 @@ The system uses **runtime discovery** - no hardcoded lists of props.
 The dashboard scans `/opt/props/*/plugin/page.py` and `/app/builtin_plugins/*.py` at startup. Each plugin must define a `class Plugin(BasePlugin)` with:
 
 **Class attributes:**
+
 - `name: str` - Display name for the plugin
 - `zone: str` - Optional; either `"card"` (default) or `"topbar"`
 
 **Methods:**
+
 - `layout(self) -> Component` - Returns a Dash component for the UI
 - `on_register(self, app, services) -> None` - Registers callbacks and subscriptions
 
 The `BasePlugin` class provides:
+
 - `self.cache` - Thread-safe dict-like cache (use `self.cache[key] = value`)
 - `self.cache_get(key, default)` - Safe cache retrieval
 - `self.cache_set(key, value)` - Safe cache storage
@@ -221,6 +230,7 @@ The `BasePlugin` class provides:
 - `self.mqtt_subscribe(topic, callback)` - MQTT subscribe helper
 
 The `services` dict passed to `on_register()` contains:
+
 - `mqtt` - MQTT client instance (wrapped by BasePlugin as helper methods)
 - `cache` - Raw shared cache dict (wrapped by BasePlugin as `self.cache`)
 - `app` - Dash app instance (for direct callback registration)
@@ -231,19 +241,23 @@ The `services` dict passed to `on_register()` contains:
 The worker host scans `/app/props/*/backend/worker.py` and `/app/worker_host/builtin_workers/*.py` at startup. Each backend must define a `class Worker(BaseWorker)` with:
 
 **Constructor signature:**
+
 ```python
 def __init__(self, prop_id: str, mqtt: MqttClientProto, config: dict | BaseModel | None = None)
 ```
 
 **Optional module-level attributes:**
+
 - `PROP_ID = "my_prop"` - Explicit prop ID (defaults to folder name if not specified)
 - `class ConfigModel(BaseModel)` - Pydantic model for validating `config.yaml`
 
 **Methods to implement:**
+
 - `async def start(self) -> None` - Called when worker starts (subscribe to topics, set up timers)
 - `async def do_<action>(self, arg: str | dict | None) -> None` - Command handlers (e.g., `do_arm`, `do_play`)
 
 The `BaseWorker` class provides:
+
 - `self.prop_id` - Unique identifier for the prop
 - `self.mqtt` - MQTT client (publish, subscribe)
 - `self.config` - Parsed config (dict or Pydantic model)
@@ -255,6 +269,7 @@ The `BaseWorker` class provides:
 
 **Command dispatching:**
 Messages on `halloween/<prop_id>/cmd` are automatically dispatched to `do_<action>()` methods based on the payload:
+
 - Text payload `"arm"` → calls `do_arm(None)`
 - JSON `{"action": "play"}` → calls `do_play(None)`
 - JSON `{"action": "chromecast", "args": {"volume": 0.5}}` → calls `do_chromecast({"volume": 0.5})`
@@ -263,38 +278,42 @@ Messages on `halloween/<prop_id>/cmd` are automatically dispatched to `do_<actio
 
 1. Create prop directory structure:
 
-```bash
-mkdir -p props/my_prop/{firmware,plugin,backend}
-```
+   ```bash
+   mkdir -p props/my_prop/{firmware,plugin,backend}
+   ```
 
 2. Implement components:
+
    - `plugin/page.py` - Dashboard UI (must define `class Plugin(BasePlugin)`)
    - `backend/worker.py` - Server logic (must define `class Worker(BaseWorker)`)
    - `firmware/main.py` - ESP32 code (optional)
 
 3. Document MQTT contract:
+
    - Create `props/my_prop/topics.md`
 
 4. Restart services:
-```bash
-docker compose -f docker-compose.yml \
-               -f docker-compose.workers.yml \
-               -f docker-compose.dashboard.yml \
-               up --build
-```
 
-Often it is necessary to remove the old containers to trigger a complete rebuild:
-```bash
-docker compose -f docker-compose.yml \
-               -f docker-compose.workers.yml \
-               -f docker-compose.dashboard.yml \
-               rm
+   ```bash
+   docker compose -f docker-compose.yml \
+                  -f docker-compose.workers.yml \
+                  -f docker-compose.dashboard.yml \
+                  up --build
+   ```
 
-docker compose -f docker-compose.yml \
-               -f docker-compose.workers.yml \
-               -f docker-compose.dashboard.yml \
-               up --build
-```
+   Often it is necessary to remove the old containers to trigger a complete rebuild:
+
+   ```bash
+   docker compose -f docker-compose.yml \
+                  -f docker-compose.workers.yml \
+                  -f docker-compose.dashboard.yml \
+                  rm
+
+   docker compose -f docker-compose.yml \
+                  -f docker-compose.workers.yml \
+                  -f docker-compose.dashboard.yml \
+                  up --build
+   ```
 
 The new prop will be auto-discovered and loaded!
 
@@ -307,6 +326,7 @@ Props with physical ESP32 hardware use MicroPython firmware located in `props/<p
 #### Shared MicroPython Libraries
 
 Common MicroPython utilities are in `libs/micropython/mp_common/`:
+
 - `wifi.py` - WiFi connection with retry/backoff
 - `mqtt.py` - Lightweight MQTT pub/sub
 - `msgpack_json.py` - Tiny serialization helpers
@@ -357,7 +377,7 @@ volume_default: 0.5
 
 All communication follows this convention:
 
-```
+```text
 halloween/<prop_id>/cmd                    # Commands (JSON or text)
 halloween/<prop_id>/state                  # Current state
 halloween/<prop_id>/availability           # online/offline
@@ -400,12 +420,14 @@ docker compose logs dashboard
 ```
 
 Look for plugin discovery messages like:
-```
+
+```text
 [plugin_loader] Loaded plugin 'Tesla Hue Nest' from /opt/props/tesla_hue_nest/plugin/page.py (zone=card)
 [plugin_loader] Skipping prop plugin 'example_prop' (disabled by env)
 ```
 
 Verify that:
+
 - Props exist in `/opt/props/` (volume mount working)
 - `PLUGIN_PROPS_ALLOW` or `PLUGIN_PROPS_DISABLE` is set correctly
 - Plugin files expose required attributes: `name`, `layout`, `register_callbacks`
@@ -419,12 +441,14 @@ docker compose logs mqtt worker_host
 ```
 
 Look for worker discovery messages:
-```
+
+```text
 [worker_host] Discovered workers:
   - prop_id=tesla_hue_nest origin=/app/props/tesla_hue_nest/backend/worker.py
 ```
 
 Verify:
+
 - MQTT credentials in `config/secrets/mqtt_users.env` are correct
 - Worker files define `class Worker(BaseWorker)`
 - Props are not disabled via `WORKER_PROPS_DISABLE` or `WORKER_PROPS_ALLOW`
@@ -495,6 +519,7 @@ MQTT_ADMIN_PW=your_password
 ### Where do integrations (Tesla/Hue/Nest APIs) live?
 
 Keep vendor-specific logic inside the prop's backend (e.g., `props/tesla_hue_nest/backend/`). If multiple props need the same integration, you can:
+
 - Move shared client code to `libs/py/halloween_common/`
 - Access it via imports in worker backends
 - Keep access tokens/secrets in `config/secrets/`
@@ -516,6 +541,7 @@ The same variables work for workers by setting them in `config/worker_host.env`.
 ### Can props share state or communicate with each other?
 
 Yes, through MQTT. Props can:
+
 - Subscribe to other props' telemetry topics: `halloween/<other_prop>/telemetry/#`
 - Send commands to other props: publish to `halloween/<other_prop>/cmd`
 - Use shared MQTT topics for coordination
@@ -531,12 +557,14 @@ The dashboard `services.cache` dict also allows plugins to share state, though t
    - Firmware copies from `libs/micropython/mp_common/`
 3. **Document MQTT contract** in `props/my_prop/topics.md`
 4. **Run locally with dev compose**:
+
    ```bash
    docker compose -f infra/compose/docker-compose.yml \
                   -f infra/compose/docker-compose.workers.yml \
                   -f infra/compose/docker-compose.dashboard.yml \
                   up --build
    ```
+
 5. **Iterate**: Props are bind-mounted, so code changes are reflected on container restart
 6. **Test**: Dashboard auto-loads plugin, worker host auto-loads backend
 7. **Deploy**: Use same compose files or bake props into images for production
@@ -552,6 +580,7 @@ docker compose -f docker-compose.yml \
 ```
 
 This launches an `mqtt_test` service that:
+
 - Installs test dependencies from `libs/py[test]`
 - Runs integration tests in `libs/py/tests/integration/mqtt`
 - Validates MQTT authentication and connectivity
@@ -562,11 +591,13 @@ The test results are displayed in the container logs.
 ## 🎬 2025 Experiences & Learnings
 
 ### What Worked Well
+
 - ✅ Web dashboard was significantly better than terminal-based control
 - ✅ Modular prop architecture made adding/removing features easy
 - ✅ MQTT message bus enabled clean separation of concerns
 
 ### Issues Encountered
+
 - ⚠️ Volume settings not persistent (props reset to default volume on each play)
 - ⚠️ Stop button should reset cooldown timers for immediate re-arm
 - ⚠️ Tesla trunk sometimes out of sync with Hue lights
@@ -576,6 +607,7 @@ The test results are displayed in the container logs.
 - ⚠️ Doungeon soundscape not implemented
 
 ### TODO
+
 - [ ] Implement dungeon soundscape based on thriller_hue_nest (we don't need hue operation, so simplify)
 - [ ] Implement persistent volume settings across container restarts
 - [ ] Move hue, chromecast and tesla integration apis to common folder and ensure import from there
@@ -602,4 +634,4 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ---
 
-**Happy Haunting! 🎃👻**
+## Happy Haunting! 🎃👻
