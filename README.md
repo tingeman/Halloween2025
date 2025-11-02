@@ -571,6 +571,7 @@ The test results are displayed in the container logs.
 - ⚠️ Stop button should reset cooldown timers for immediate re-arm
 - ⚠️ Tesla trunk sometimes out of sync with Hue lights
 - ⚠️ Trunk occasionally opened and closed quickly
+- ⚠️ Last time attempted, the trunk did not close at end of play, and dashboard buttons would not acutate it
 - ⚠️ No direct "play" trigger (required arm + motion sensor)
 - ⚠️ Doungeon soundscape not implemented
 
